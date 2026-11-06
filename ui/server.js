@@ -269,16 +269,27 @@ function setAgentModel(id, model) {
   return updated;
 }
 
+function agentEffortOf(file) {
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    const m = raw.match(/^reasoningEffort:\s*(\w+)$/mi);
+    return m ? m[1].toLowerCase() : 'default';
+  } catch { return 'default'; }
+}
+
 function teamPayload() {
   const files = fs.existsSync(AGENTS_DIR) ? fs.readdirSync(AGENTS_DIR).filter(f => f.endsWith('.md')) : [];
   const meta = {};
   for (const f of files) { const p = parseAgentFile(f); if (p) meta[p.id] = p; }
   const activeIds = [...runs.values()].filter(r => r.status === 'running').map(r => r.agent);
+  const usage = agentUsage();
   return ROSTER.map(slot => ({
     ...slot,
     mode: meta[slot.id]?.mode || 'subagent',
     model: meta[slot.id]?.model || 'inherited',
     description: meta[slot.id]?.description || '',
+    effort: agentEffortOf(path.join(AGENTS_DIR, slot.id + '.md')),
+    usage: usage[slot.id] || { total: 0, done: 0, totalMs: 0 },
     busy: activeIds.includes(slot.id),
   }));
 }

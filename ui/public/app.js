@@ -117,11 +117,21 @@ function renderBadges(roster) {
     b.dataset.agent = a.id;
     b.style.setProperty('--ink', a.color);
     b.setAttribute('aria-pressed', String(a.id === state.selectedAgent));
+    const u = a.usage || { total: 0, done: 0, totalMs: 0 };
+    const effort = a.effort && a.effort !== 'default' ? `<span class="bstat">effort <b>${a.effort}</b></span>` : '';
+    let statLine;
+    if (u.total > 0) {
+      const pct = Math.round((u.done / u.total) * 100);
+      statLine = `<span class="bstat"><b>${u.total}</b> run${u.total === 1 ? '' : 's'}</span><span class="bstat"><b>${pct}%</b> green</span>${effort}`;
+    } else {
+      statLine = `<span class="bstat dim">no runs yet</span>${effort}`;
+    }
     b.innerHTML = `
       <span class="badge-hole" aria-hidden="true"></span>
       <span class="badge-stamp">${a.code}</span>
       <span class="badge-name">${a.id}</span>
       <span class="badge-duty">${a.blurb}</span>
+      <span class="badge-stats" aria-label="Lifetime usage">${statLine}</span>
       <span class="badge-foot">
         <span class="badge-model">${String(a.model).replace(/^opencode\//, '')}</span>
         <span class="badge-state ${a.busy ? 'live' : ''}">${a.busy ? 'on shift' : 'standby'}</span>
