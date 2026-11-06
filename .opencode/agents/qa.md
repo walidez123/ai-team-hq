@@ -21,3 +21,8 @@ On every handoff:
 Rules:
 - You may create and edit test files freely. For source files, only fix trivial compile/type errors; otherwise hand failures back to `@backend` / `@frontend` with a clear diagnosis.
 - A failing suite is a blocked pipeline — say so explicitly.
+
+## Shift log (required)
+When you finish your part of a task, append exactly one JSON line to `journal/qa.jsonl` in the current project root (create `journal/` if missing). Fields:
+{""ts"":""<ISO-8601>"",""task"":""<what you were asked, under 120 chars>"",""summary"":""<1-2 sentences: what you did and how it went>"",""status"":""done|partial|failed""}
+Append with a shell command (for example `echo '<json>' >> journal/qa.jsonl`). Never rewrite the file. If the folder is not writable, say so in your reply instead of skipping silently.

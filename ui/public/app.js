@@ -270,6 +270,7 @@ function handleEvent(ev) {
     const ok = ev.status === 'done';
     logLine(ok ? '✓ run finished' : `✗ run ${ev.status} (exit ${ev.exitCode ?? '?'})`, ok ? 'ln-done' : 'ln-err');
     railFinish(ok); closeStream(); restoreAssignBtn(); state.currentRunId = null; fetchTeam(); fetchReports(); fetchMetrics();
+    if (shiftsOn) fetchJournal();
     return;
   }
   if (ev.kind === 'json') return renderJsonEvent(ev);
@@ -358,6 +359,59 @@ fetchMetrics();
 setInterval(fetchTeam, 5000);
 setInterval(fetchReports, 10000);
 setInterval(fetchMetrics, 15000);
+setInterval(() => { if (shiftsOn) fetchJournal(); }, 15000);
+
+/* ---------- shift log ---------- */
+const shiftViewBtn = $('#shiftViewBtn');
+const shiftView = $('#shiftView');
+let shiftsOn = false;
+
+function el(tag, cls, text) {
+  const d = document.createElement(tag);
+  if (cls) d.className = cls;
+  if (text != null) d.textContent = text;
+  return d;
+}
+function renderShiftView(data) {
+  shiftView.innerHTML = '';
+  for (const a of data.agents) {
+    const row = el('div', 'shift-row');
+    const head = el('div', 'shift-head');
+    const code = el('span', 'shift-code', a.code); code.style.setProperty('--ink', a.color);
+    head.append(code, el('span', 'shift-name', a.id), el('span', 'shift-count', `${a.entries.length} entr${a.entries.length === 1 ? 'y' : 'ies'}`));
+    row.appendChild(head);
+    if (!a.entries.length) {
+      row.appendChild(el('div', 'shift-empty', 'No entries yet — employees write one line each as they finish work.'));
+    } else {
+      const list = el('div', 'shift-entries');
+      for (const e of a.entries.slice().reverse()) {
+        const line = el('div', 'shift-entry');
+        const dot = el('span', `shift-dot ${e.status || 'done'}`);
+        const time = el('span', 'shift-time', e.ts ? new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--');
+        line.append(dot, time, el('span', 'shift-summary', e.summary || `(${e.status})`));
+        list.appendChild(line);
+      }
+      row.appendChild(list);
+    }
+    shiftView.appendChild(row);
+  }
+}
+async function fetchJournal() {
+  try {
+    const dir = $('#dirInput').value.trim();
+    const r = await fetch('/api/journal' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
+    const data = await r.json();
+    renderShiftView(data);
+  } catch { /* leave the panel as-is */ }
+}
+shiftViewBtn.addEventListener('click', () => {
+  shiftsOn = !shiftsOn;
+  shiftViewBtn.setAttribute('aria-pressed', String(shiftsOn));
+  shiftViewBtn.textContent = shiftsOn ? 'live wire' : 'shift log';
+  $('#log').hidden = shiftsOn;
+  shiftView.hidden = !shiftsOn;
+  if (shiftsOn) fetchJournal();
+});
 
 /* ---------- field guide ---------- */
 const guideOverlay = $('#guideOverlay');

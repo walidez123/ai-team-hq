@@ -82,8 +82,8 @@ function startRun({ task, agent, dir }) {
     status: 'running', exitCode: null, error: null,
     events: [], clients: new Set(), child: null,
   };
-  const args = ['run', '--format', 'json', '--auto', '--agent', run.agent, '--title', `hq:${id}`, task];
-  const child = execFile(OPENCODE, args, { cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024 }, (err) => {
+  const args = ['run', '--standalone', '--format', 'json', '--auto', '--agent', run.agent, '--title', `hq:${id}`, task];
+  const child = execFile(OPENCODE, args, { cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }, (err) => {
     run.endedAt = new Date().toISOString();
     run.exitCode = err && typeof err.code === 'number' ? err.code : 0;
     run.status = err ? 'error' : 'done';
@@ -100,6 +100,9 @@ function startRun({ task, agent, dir }) {
     run.clients.clear();
   });
   run.child = child;
+  // Critical: the CLI blocks forever on a stdin pipe that never sees EOF.
+  // Close it immediately — prompt comes from the argument, not stdin.
+  if (child.stdin) child.stdin.end();
 
   const pump = (chunk, stream) => {
     for (const line of chunk.toString().split(/\r?\n/)) {
@@ -185,6 +188,7 @@ function scaffoldProject({ name, targetPath }) {
   const adopted = fs.existsSync(dest) && fs.readdirSync(dest).length > 0;
   fs.mkdirSync(path.join(dest, 'docs'), { recursive: true });
   fs.mkdirSync(path.join(dest, 'reports'), { recursive: true });
+  fs.mkdirSync(path.join(dest, 'journal'), { recursive: true });
   const copyIfMissing = (src, dst) => { if (!fs.existsSync(dst)) fs.copyFileSync(src, dst); };
   copyIfMissing(path.join(TEMPLATE_DIR, '.gitignore'), path.join(dest, '.gitignore'));
   copyIfMissing(path.join(TEMPLATE_DIR, 'docs', 'report-template.md'), path.join(dest, 'docs', 'report-template.md'));
@@ -297,6 +301,36 @@ const server = http.createServer(async (req, res) => {
       const md = readReport(name);
       return md === null ? sendJson(res, 404, { error: 'not found' }) : sendJson(res, 200, { name, content: md });
     }
+    // ---- shift log (per-employee journals in the project being worked on) ----
+    if (pathname === '/api/journal' && req.method === 'GET') {
+      let target = ROOT;
+      const q = url.searchParams.get('dir');
+      if (q) {
+        const resolved = path.resolve(q);
+        if (path.isAbsolute(resolved) && isDir(resolved)) target = resolved;
+      }
+      const journalDir = path.join(target, 'journal');
+      const agents = ROSTER.map(slot => {
+        let entries = [];
+        try {
+          entries = fs.readFileSync(path.join(journalDir, slot.id + '.jsonl'), 'utf8')
+            .split('\n')
+            .filter(Boolean)
+            .map(l => { try { return JSON.parse(l); } catch { return null; } })
+            .filter(Boolean)
+            .slice(-8)
+            .map(e => ({
+              ts: e.ts || null,
+              task: String(e.task || '').slice(0, 160),
+              summary: String(e.summary || '').slice(0, 400),
+              status: ['done', 'partial', 'failed'].includes(e.status) ? e.status : 'unknown',
+            }));
+        } catch { /* this employee has no journal yet */ }
+        return { ...slot, entries };
+      });
+      return sendJson(res, 200, { dir: target, agents });
+    }
+
     if (pathname === '/api/metrics' && req.method === 'GET') return sendJson(res, 200, metricsSummary());
     if (pathname === '/api/runs' && req.method === 'GET') {
       return sendJson(res, 200, { runs: [...runs.values()].map(({ child, clients, events, ...r }) => ({ ...r, eventCount: events.length })) });

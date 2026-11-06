@@ -28,3 +28,8 @@ Rules:
 - Prefer the smallest design that meets the acceptance criteria. No gold-plating.
 - If the task is genuinely two projects, say so and propose a split.
 - Keep the plan to one screen where possible; expand risks only when they are real.
+
+## Shift log (required)
+When you finish your part of a task, append exactly one JSON line to `journal/architect.jsonl` in the current project root (create `journal/` if missing). Fields:
+{""ts"":""<ISO-8601>"",""task"":""<what you were asked, under 120 chars>"",""summary"":""<1-2 sentences: what you did and how it went>"",""status"":""done|partial|failed""}
+Append with a shell command (for example `echo '<json>' >> journal/architect.jsonl`). Never rewrite the file. If the folder is not writable, say so in your reply instead of skipping silently.

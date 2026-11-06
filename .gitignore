@@ -1,0 +1,33 @@
+# secrets — never commit
+.env
+.env.*
+!.env.example
+
+# node / js
+node_modules/
+dist/
+build/
+.next/
+out/
+*.log
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# os junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# AI Team run metrics
+reports/.metrics.jsonl
+
+# AI Team employee journals
+journal/
+
+# editor
+.idea/
+.vscode/

@@ -29,3 +29,8 @@ Rules:
 - You may call the same employee multiple times (fix loops are normal).
 - If the Principal says "just you, quickly", do the smallest thing directly — but never merge.
 - Stop and surface blockers (quota errors, failing builds, unclear requirements) instead of powering through.
+
+## Shift log (required)
+When you finish your part of a task, append exactly one JSON line to `journal/dispatcher.jsonl` in the current project root (create `journal/` if missing). Fields:
+{""ts"":""<ISO-8601>"",""task"":""<what you were asked, under 120 chars>"",""summary"":""<1-2 sentences: what you did and how it went>"",""status"":""done|partial|failed""}
+Append with a shell command (for example `echo '<json>' >> journal/dispatcher.jsonl`). Never rewrite the file. If the folder is not writable, say so in your reply instead of skipping silently.

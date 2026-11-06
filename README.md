@@ -78,6 +78,7 @@ A small local web UI for the team: roster with live status, a task box that disp
 
 Notes:
 
+- **Shift log:** every employee appends one JSONL line to `journal/<agent>.jsonl` (task, summary, done/partial/failed) in the project it works on. Toggle **shift log** in the Live wire header to see all 8 employees' latest entries — distinct from the raw stream, same projects scope.
 - **Run metrics:** every run is journaled to `reports/.metrics.jsonl` (task, agent, project, start/end, duration, exit code) and summarized live in the console strip under the rail: totals, % green, average duration, last result. Honest data — the one row from 2026-11-06 records a free-tier timeout I had to kill (see chat log). Add `reports/.metrics.jsonl` to gitignores (the project template already does).
 - Runs use `opencode run --auto` (auto-approves permissions so OpenCode doesn't stall waiting for a human) — watch the console stream and **stop** anything you don't like.
 - Concurrency: each task = one `opencode` process; agents inside one run still execute sequentially.

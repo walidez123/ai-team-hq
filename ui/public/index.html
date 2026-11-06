@@ -73,6 +73,7 @@
         <div class="wire-controls">
           <select id="agentSelect" aria-label="Who takes this task" data-tip="Dispatcher runs the full pipeline, or pick one employee for focused work."></select>
           <button id="stopBtn" class="btn btn-quiet" disabled data-tip="Halt the current run at the next safe point.">Stop run</button>
+          <button id="shiftViewBtn" class="btn btn-quiet btn-small" aria-pressed="false" data-tip="Per-employee shift log — one line each, straight from their journals.">shift log</button>
           <button id="clearBtn" class="btn btn-quiet" data-tip="Wipe the log. A run in progress keeps streaming.">Clear wire</button>
         </div>
       </div>
@@ -110,6 +111,7 @@
         <p class="wire-empty">Quiet on the wire. Assign a task — the crew plans it, builds it, tests it, reviews it and files a report, in that order.</p>
         <span id="wireCursor" class="wire-cursor" aria-hidden="true"></span>
       </div>
+      <div id="shiftView" class="shift-view" hidden></div>
     </section>
 
     <!-- Filed reports -->

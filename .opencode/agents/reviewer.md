@@ -29,3 +29,8 @@ Output format:
 Rules:
 - Findings must be concrete and tied to the diff. No style nitpicks beyond naming that genuinely misleads.
 - `CRITICAL` (security holes, data loss) always blocks. `MAJOR` blocks unless the Principal waives it. `MINOR` is advisory.
+
+## Shift log (required)
+When you finish your part of a task, append exactly one JSON line to `journal/reviewer.jsonl` in the current project root (create `journal/` if missing). Fields:
+{""ts"":""<ISO-8601>"",""task"":""<what you were asked, under 120 chars>"",""summary"":""<1-2 sentences: what you did and how it went>"",""status"":""done|partial|failed""}
+Append with a shell command (for example `echo '<json>' >> journal/reviewer.jsonl`). Never rewrite the file. If the folder is not writable, say so in your reply instead of skipping silently.

@@ -17,6 +17,16 @@ You are a member of the AI Team, an orchestrated set of AI agents run by one hum
 
 The explainer is **not** part of the standard pipeline — call it directly (`@explainer` in OpenCode, or the explainer card in the HQ) whenever a project needs an explanation, onboarding doc, or architectural read-out. Its output is `docs/PROJECT-GUIDE.md` in the project root.
 
+## Shift log
+
+Every employee appends exactly one JSONL line to `journal/<agent>.jsonl` when it finishes its part of a task:
+
+```json
+{"ts":"2026-11-06T16:40:00.000Z","task":"add CSV export","summary":"implemented endpoint + button; QA green","status":"done"}
+```
+
+The HQ dashboard reads these files (project root, or `?dir=`) and renders them as the per-employee shift log. Agents must never rewrite this file — append only.
+
 ## The pipeline (every task follows it)
 
 1. **Principal** assigns a task (e.g. `/task add CSV export to the reports page`).

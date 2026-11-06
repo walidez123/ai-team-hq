@@ -28,7 +28,7 @@ if ($nonEmpty -and -not $Adopt) {
 }
 
 New-Item -ItemType Directory -Force $Path | Out-Null
-New-Item -ItemType Directory -Force (Join-Path $Path 'docs'), (Join-Path $Path 'reports') | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $Path 'docs'), (Join-Path $Path 'reports'), (Join-Path $Path 'journal') | Out-Null
 
 function Copy-IfMissing([string] $src, [string] $dst) {
     if (-not (Test-Path $dst)) {

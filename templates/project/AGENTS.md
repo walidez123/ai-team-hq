@@ -15,6 +15,10 @@ This project is worked by the **AI Team** (installed globally in `C:\Users\waled
 | Reporter   | `reporter`   | Final report → `reports/`                          |
 | Explainer  | `explainer`  | Deep project read → `docs/PROJECT-GUIDE.md`        |
 
+## Shift log
+
+Each employee appends one JSONL line to `journal/<agent>.jsonl` when done with its part; append only, never rewrite. Format: `{"ts":"...","task":"...","summary":"...","status":"done|partial|failed"}`. The HQ dashboard renders these as the per-employee log.
+
 ## Pipeline (every task)
 
 Scope → `@architect` plan → `@backend` / `@frontend` implement → `@qa` test → `@reviewer` review → `@reporter` files `reports/YYYY-MM-DD-HHMM-<slug>.md`.

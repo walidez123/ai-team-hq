@@ -25,6 +25,9 @@ desktop.ini
 # AI Team run metrics
 reports/.metrics.jsonl
 
+# AI Team employee journals
+journal/
+
 # editor
 .idea/
 .vscode/
