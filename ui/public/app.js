@@ -641,6 +641,27 @@ function renderSettings(data) {
   }
 }
 
+const distributeFreeBtn = $('#distributeFree');
+const distributeNote = $('#distributeNote');
+async function distributeFree() {
+  distributeFreeBtn.disabled = true;
+  distributeNote.hidden = false;
+  distributeNote.textContent = 'spreading the free catalog…';
+  try {
+    const r = await fetch('/api/agents/distribute', { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) { distributeNote.textContent = `not spread: ${data.error || 'unknown error'}`; return; }
+    const lines = Object.entries(data.assignment).map(([id, m]) => `${id} → ${m.replace(/^opencode\//, '')}`);
+    distributeNote.textContent = `Spread ${data.totalFree} free models across the bench: ${lines.join(' · ')}${data.spare.length ? ` — spare: ${data.spare.map(m => m.replace(/^opencode\//, '')).join(', ')}` : ''}`;
+    loadSettings();
+  } catch (e) {
+    distributeNote.textContent = `not spread: ${String(e.message || e)}`;
+  } finally {
+    distributeFreeBtn.disabled = false;
+  }
+}
+distributeFreeBtn.addEventListener('click', distributeFree);
+
 /* ---------- field guide ---------- */
 const guideOverlay = $('#guideOverlay');
 const openGuideBtn = $('#openGuide');

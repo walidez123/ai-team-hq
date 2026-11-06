@@ -170,10 +170,12 @@
       </header>
 
       <div class="settings-vitals" id="settingsVitals" aria-label="Machine usage summary"></div>
-    <div class="settings-body" id="settingsBody"></div>
+      <p class="vital-note" id="distributeNote" aria-live="polite" hidden></p>
+      <div class="settings-body" id="settingsBody"></div>
 
       <footer class="guide-foot">
         <small>Saved straight into <code>.opencode/agents/&lt;name&gt;.md</code> (global + this project). Models ending in <code>-free</code> cost nothing today; paid ones error on dispatch until you add keys. <b>Effort</b> is passed through as <code>reasoningEffort</code> if the model supports it. <b>Remaining free quota is not published</b> — OpenCode exposes consumption, not balance; watch for <code>FreeUsageLimitError</code>.</small>
+        <button id="distributeFree" class="btn btn-quiet btn-small" title="Deal the free catalog across the 8 employees — no single model carries everyone">Spread free models</button>
         <button id="settingsDone" class="btn btn-assign">Done</button>
       </footer>
     </div>

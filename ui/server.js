@@ -229,6 +229,34 @@ function agentSettingsPayload() {
   };
 }
 
+// ---------- distribute the free catalog across the bench ----------
+const PREFERRED_FREE = {
+  dispatcher: 'opencode/glm-5.3-flash-free',          // proven daily driver
+  architect:  'opencode/deepseek-v4.1-flash-free',    // proven for planning
+  qa:         'opencode/nemotron-3.5-super-vl-free',  // vision-capable, fits QA
+  reporter:   'opencode/mimo-v2.6-flash-free',        // writing-flavored
+};
+
+function distributeFreeModels() {
+  const catalog = getModelCatalog();
+  const free = catalog.filter(m => /-free$/i.test(m));
+  if (free.length === 0) throw new Error('the free catalog is empty right now — check `opencode models`');
+  const remaining = new Set(free);
+  const assignment = {};
+  for (const slot of ROSTER) {
+    let pick = PREFERRED_FREE[slot.id];
+    if (!pick || !remaining.has(pick)) pick = [...remaining][0];
+    if (!pick) pick = free[0]; // catalog smaller than the bench — wrap rather than fail
+    remaining.delete(pick);
+    assignment[slot.id] = pick;
+  }
+  const updated = [];
+  for (const [id, model] of Object.entries(assignment)) {
+    for (const dir of setAgentModel(id, model)) updated.push(dir);
+  }
+  return { assignment, spare: [...remaining], totalFree: free.length, updated: updated.length };
+}
+
 const EFFORT_LEVELS = ['low', 'medium', 'high'];
 function setAgentEffort(id, effort) {
   if (!ROSTER.some(s => s.id === id)) throw new Error(`unknown employee: ${id}`);
@@ -257,16 +285,18 @@ function setAgentModel(id, model) {
   const catalog = getModelCatalog();
   if (catalog.length && !catalog.includes(model)) throw new Error(`model not in catalog: ${model} — run \`opencode models\` to see current free ones`);
   const updated = [];
+  let found = false;
   for (const dir of [GLOBAL_AGENTS_DIR, AGENTS_DIR]) {
     const file = path.join(dir, id + '.md');
     if (!fs.existsSync(file)) continue;
+    found = true;
     const before = fs.readFileSync(file, 'utf8');
     if (!/^model:.*$/m.test(before)) { fs.writeFileSync(file, before.replace('\n---', `\nmodel: ${model}\n---`)); updated.push(dir + ' (model line added)'); continue; }
     const after = before.replace(/^model:.*$/m, `model: ${model}`);
     if (after !== before) { fs.writeFileSync(file, after); updated.push(dir); }
   }
-  if (!updated.length) throw new Error(`no agent file found for ${id}`);
-  return updated;
+  if (!found) throw new Error(`no agent file found for ${id}`);
+  return updated; // empty means "already on this model", not an error
 }
 
 function agentEffortOf(file) {
@@ -474,6 +504,16 @@ const server = http.createServer(async (req, res) => {
         if (effort !== undefined) updated = updated.concat(setAgentEffort(id, effort));
         if (!model && effort === undefined) throw new Error('nothing to change — pass model and/or effort');
         return sendJson(res, 200, { ok: true, id, updated });
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+    }
+
+    // ---- spread the free catalog across the bench ----
+    if (pathname === '/api/agents/distribute' && req.method === 'POST') {
+      try {
+        const result = distributeFreeModels();
+        return sendJson(res, 200, { ok: true, ...result });
       } catch (e) {
         return sendJson(res, 400, { error: e.message });
       }

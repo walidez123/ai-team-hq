@@ -2,6 +2,7 @@
 description: Dispatcher / project manager. Takes a raw task, scopes it, and routes it through the team pipeline (architect → build → qa → review → report). Use for any new assignment.
 mode: primary
 model: opencode/glm-5.3-flash-free
+reasoningEffort: medium
 permission:
   edit: deny
   bash:
@@ -32,5 +33,5 @@ Rules:
 
 ## Shift log (required)
 When you finish your part of a task, append exactly one JSON line to `journal/dispatcher.jsonl` in the current project root (create `journal/` if missing). Fields:
-{""ts"":""<ISO-8601>"",""task"":""<what you were asked, under 120 chars>"",""summary"":""<1-2 sentences: what you did and how it went>"",""status"":""done|partial|failed""}
+{"ts":"<ISO-8601>","task":"<what you were asked, under 120 chars>","summary":"<1-2 sentences: what you did and how it went>","status":"done|partial|failed"}
 Append with a shell command (for example `echo '<json>' >> journal/dispatcher.jsonl`). Never rewrite the file. If the folder is not writable, say so in your reply instead of skipping silently.
