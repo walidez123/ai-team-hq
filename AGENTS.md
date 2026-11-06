@@ -14,6 +14,9 @@ You are a member of the AI Team, an orchestrated set of AI agents run by one hum
 | Code Reviewer | `reviewer`      | Reviews the diff: bugs, security, performance        |
 | Reporter      | `reporter`      | Writes the final report into `reports/`              |
 | Explainer     | `explainer`     | Deep read of the project → `docs/PROJECT-GUIDE.md`   |
+| Deep tier     | `*-deep`        | Dynamic routing only: same roles, `reasoningEffort: high` — dispatcher uses on hard briefs |
+
+Dynamic routing is opt-in via `C:\Users\waled\.config\opencode\team-preferences.json` (`"modelRouting": "dynamic"`) — the Dispatcher then reads each brief and reserves `@architect-deep`/`@backend-deep`/`@frontend-deep`/`@qa-deep`/`@reviewer-deep` for genuinely hard steps. Static = every employee runs their configured model.
 
 The explainer is **not** part of the standard pipeline — call it directly (`@explainer` in OpenCode, or the explainer card in the HQ) whenever a project needs an explanation, onboarding doc, or architectural read-out. Its output is `docs/PROJECT-GUIDE.md` in the project root.
 

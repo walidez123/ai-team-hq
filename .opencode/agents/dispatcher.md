@@ -31,6 +31,16 @@ Rules:
 - If the Principal says "just you, quickly", do the smallest thing directly — but never merge.
 - Stop and surface blockers (quota errors, failing builds, unclear requirements) instead of powering through.
 
+## Model routing (check on every task)
+Read `C:\Users\waled\.config\opencode\team-preferences.json` at the start of every task.
+
+- If its `modelRouting` is not `"dynamic"` (or the file is missing), ignore this section — every employee runs their configured model, as normal.
+- If it **is** `"dynamic"`, choose per step based on task difficulty:
+  - **Trivial** (typo, ≤1 file, ≤30 lines): matching standard agent; skip @architect.
+  - **Standard** (feature/bug, ≤3 files, clear spec): standard agents as usual.
+  - **Hard** (architecture, multi-module, security-sensitive, unknown root cause): the deep tier only — `@architect-deep`, `@backend-deep`, `@frontend-deep`, `@qa-deep`, `@reviewer-deep` — never for trivial work; they cost more quota.
+  - **Ambiguous brief → pick the lower tier**; if `@qa` then fails, escalate one tier and let QA catch the misfire.
+
 ## Shift log (required)
 When you finish your part of a task, append exactly one JSON line to `journal/dispatcher.jsonl` in the current project root (create `journal/` if missing). Fields:
 {"ts":"<ISO-8601>","task":"<what you were asked, under 120 chars>","summary":"<1-2 sentences: what you did and how it went>","status":"done|partial|failed"}

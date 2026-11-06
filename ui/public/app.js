@@ -662,6 +662,35 @@ async function distributeFree() {
 }
 distributeFreeBtn.addEventListener('click', distributeFree);
 
+/* ---------- model routing preference ---------- */
+const routingStaticBtn = $('#routingStatic');
+const routingDynamicBtn = $('#routingDynamic');
+function setRoutingUI(value) {
+  routingStaticBtn.setAttribute('aria-pressed', String(value === 'static'));
+  routingDynamicBtn.setAttribute('aria-pressed', String(value === 'dynamic'));
+}
+async function loadPreferences() {
+  try {
+    const r = await fetch('/api/preferences');
+    const p = await r.json();
+    setRoutingUI(p.modelRouting);
+  } catch { /* leave the toggle as-is */ }
+}
+async function setRouting(value) {
+  try {
+    const r = await fetch('/api/preferences', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ modelRouting: value }),
+    });
+    const p = await r.json();
+    if (r.ok) setRoutingUI(p.modelRouting);
+  } catch { /* leave the toggle as-is */ }
+}
+routingStaticBtn.addEventListener('click', () => setRouting('static'));
+routingDynamicBtn.addEventListener('click', () => setRouting('dynamic'));
+loadPreferences();
+
 /* ---------- field guide ---------- */
 const guideOverlay = $('#guideOverlay');
 const openGuideBtn = $('#openGuide');

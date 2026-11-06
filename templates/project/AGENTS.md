@@ -14,6 +14,7 @@ This project is worked by the **AI Team** (installed globally in `C:\Users\waled
 | Reviewer   | `reviewer`   | Read-only diff review: bugs, security, performance |
 | Reporter   | `reporter`   | Final report → `reports/`                          |
 | Explainer  | `explainer`  | Deep project read → `docs/PROJECT-GUIDE.md`        |
+| Deep tier  | `*-deep`     | Dynamic routing only (`modelRouting: dynamic` in `~/.config/opencode/team-preferences.json`): `reasoningEffort: high` for hard steps |
 
 ## Shift log
 

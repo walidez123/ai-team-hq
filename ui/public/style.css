@@ -481,6 +481,17 @@ textarea::placeholder, input::placeholder { color: var(--faint); }
 .setting-save.err { color: var(--error); }
 @media (max-width: 640px) { .setting-row { grid-template-columns: 34px 1fr; } .setting-row select, .setting-save { grid-column: 2; } }
 
+.pref-bar { display: flex; align-items: center; gap: 8px; width: 100%; margin-top: 10px; border-top: 1px solid var(--hairline); padding-top: 10px; flex-wrap: wrap; }
+.pref-label { font: 400 10px var(--font-mono); letter-spacing: .12em; color: var(--faint); }
+.seg {
+  font: 400 10.5px var(--font-mono); letter-spacing: .02em; padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--hairline-strong); background: transparent; color: var(--muted); cursor: pointer;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.seg:hover { border-color: var(--rust); color: var(--text); }
+.seg[aria-pressed="true"] { background: var(--rust); border-color: var(--rust); color: var(--text); }
+.pref-buttons { display: flex; gap: 8px; align-items: center; }
+
 /* ============ stage sheet — rail drill-down ============ */
 .stage-sheet {
   position: fixed; top: 0; right: 0; height: 100vh; width: min(400px, 96vw); z-index: 150;

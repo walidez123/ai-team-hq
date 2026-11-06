@@ -324,6 +324,20 @@ function teamPayload() {
   }));
 }
 
+// ---------- team preferences (ours alone — not the CLI's config) ----------
+const PREFS_FILE = path.join(os.homedir(), '.config', 'opencode', 'team-preferences.json');
+function readPrefs() {
+  try { const j = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')); return j && typeof j === 'object' ? j : {}; } catch { return {}; }
+}
+function writePrefs(prefs) {
+  fs.mkdirSync(path.dirname(PREFS_FILE), { recursive: true });
+  fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2));
+}
+function prefsPayload() {
+  const p = readPrefs();
+  return { modelRouting: p.modelRouting === 'dynamic' ? 'dynamic' : 'static' };
+}
+
 // ---------- project registry (any absolute path, de-duplicated) ----------
 function readRegistry() {
   try { const j = JSON.parse(fs.readFileSync(PROJECTS_FILE, 'utf8')); return Array.isArray(j) ? j : []; } catch { return []; }
@@ -543,6 +557,16 @@ const server = http.createServer(async (req, res) => {
       if (run.child) run.child.kill();
       return sendJson(res, 200, { ok: true });
     }
+    // ---- team preferences (model routing: static vs dynamic) ----
+    if (pathname === '/api/preferences' && req.method === 'GET') return sendJson(res, 200, prefsPayload());
+    if (pathname === '/api/preferences' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      const value = String(body.modelRouting || '').toLowerCase();
+      if (!['static', 'dynamic'].includes(value)) return sendJson(res, 400, { error: "modelRouting must be 'static' or 'dynamic'" });
+      writePrefs({ ...readPrefs(), modelRouting: value });
+      return sendJson(res, 200, prefsPayload());
+    }
+
     // ---- multi-project registry & scaffolding ----
     if (pathname === '/api/projects' && req.method === 'GET') {
       const projects = readRegistry()

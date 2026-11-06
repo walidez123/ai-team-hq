@@ -174,9 +174,16 @@
       <div class="settings-body" id="settingsBody"></div>
 
       <footer class="guide-foot">
-        <small>Saved straight into <code>.opencode/agents/&lt;name&gt;.md</code> (global + this project). Models ending in <code>-free</code> cost nothing today; paid ones error on dispatch until you add keys. <b>Effort</b> is passed through as <code>reasoningEffort</code> if the model supports it. <b>Remaining free quota is not published</b> — OpenCode exposes consumption, not balance; watch for <code>FreeUsageLimitError</code>.</small>
-        <button id="distributeFree" class="btn btn-quiet btn-small" title="Deal the free catalog across the 8 employees — no single model carries everyone">Spread free models</button>
-        <button id="settingsDone" class="btn btn-assign">Done</button>
+        <small>Saved straight into <code>.opencode/agents/&lt;name&gt;.md</code> (global + this project). Models ending in <code>-free</code> cost nothing today; paid ones error on dispatch until you add keys. <b>Effort</b> is passed through as <code>reasoningEffort</code> if the model supports it.</small>
+        <div class="pref-bar" role="group" aria-label="How models are chosen">
+          <span class="pref-label">model choice</span>
+          <button class="seg" id="routingStatic" aria-pressed="true" data-tip="You pick each employee's model — the dispatcher uses them as configured">static — you pick</button>
+          <button class="seg" id="routingDynamic" aria-pressed="false" data-tip="The dispatcher reads each brief and reaches for the deep tier (−deep agents) on hard steps">dynamic — dispatcher routes</button>
+        </div>
+        <div class="pref-buttons">
+          <button id="distributeFree" class="btn btn-quiet btn-small" title="Deal the free catalog across the 8 employees — no single model carries everyone">Spread free models</button>
+          <button id="settingsDone" class="btn btn-assign">Done</button>
+        </div>
       </footer>
     </div>
   </div>
