@@ -269,7 +269,7 @@ function handleEvent(ev) {
     logEl.classList.remove('running');
     const ok = ev.status === 'done';
     logLine(ok ? '✓ run finished' : `✗ run ${ev.status} (exit ${ev.exitCode ?? '?'})`, ok ? 'ln-done' : 'ln-err');
-    railFinish(ok); closeStream(); restoreAssignBtn(); fetchTeam(); fetchReports(); fetchMetrics();
+    railFinish(ok); closeStream(); restoreAssignBtn(); state.currentRunId = null; fetchTeam(); fetchReports(); fetchMetrics();
     return;
   }
   if (ev.kind === 'json') return renderJsonEvent(ev);
@@ -297,7 +297,7 @@ async function dispatchTask(task, dir) {
     stopBtn.disabled = false;
     state.es = new EventSource('/api/stream?run=' + encodeURIComponent(data.id));
     state.es.onmessage = (m) => { try { handleEvent(JSON.parse(m.data)); } catch { logLine(m.data, 'ln-sys'); } };
-    state.es.onerror = () => { logEl.classList.remove('running'); closeStream(); restoreAssignBtn(); };
+    state.es.onerror = () => { logEl.classList.remove('running'); closeStream(); state.currentRunId = null; restoreAssignBtn(); };
   } catch (e) {
     logLine(`not assigned: ${e.message} — check the project path and try again`, 'ln-err');
     railFinish(false);
@@ -326,7 +326,7 @@ clearBtn.addEventListener('click', () => {
   if (active && !confirm('A run is streaming. Clear the log display only?')) return;
   const stale = logEl.querySelectorAll(':scope > .ln, :scope > .wire-empty');
   stale.forEach(n => n.remove());
-  logEl.scrollTop = logEl.scrollHeight;
+  logEl.scrollTop = 0;
   if (!active) {
     const empty = document.createElement('p');
     empty.className = 'wire-empty';
