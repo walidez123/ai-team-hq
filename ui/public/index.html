@@ -40,14 +40,14 @@
   </header>
 
   <!-- The one signature element: the pipeline, drawn as a railroad line -->
-  <div class="rail-wrap" data-tip="Click any station — see who owns it, what they ran, and what they filed.">
+  <div class="rail-wrap">
     <ol class="rail" id="rail" aria-label="Pipeline stages — click a station for details">
-      <li><button class="station" type="button" data-stage="intake" aria-label="Intake — what came in, who took it"><span class="st-dot"></span><span class="st-label">intake</span></button></li>
-      <li><button class="station" type="button" data-stage="plan" aria-label="Plan — the architect's read-out"><span class="st-dot"></span><span class="st-label">plan</span></button></li>
-      <li><button class="station" type="button" data-stage="build" aria-label="Build — backend and frontend output"><span class="st-dot"></span><span class="st-label">build</span></button></li>
-      <li><button class="station" type="button" data-stage="test" aria-label="Test — QA verdict and coverage"><span class="st-dot"></span><span class="st-label">test</span></button></li>
-      <li><button class="station" type="button" data-stage="review" aria-label="Review — reviewer findings and verdict"><span class="st-dot"></span><span class="st-label">review</span></button></li>
-      <li><button class="station" type="button" data-stage="report" aria-label="Report — the reporter's filed report"><span class="st-dot"></span><span class="st-label">report</span></button></li>
+      <li><button class="station" type="button" data-stage="intake" data-tip="What came in — and who took it" aria-label="Intake — what came in, who took it"><span class="st-dot"></span><span class="st-label">intake</span></button></li>
+      <li><button class="station" type="button" data-stage="plan" data-tip="The architect's map: files, risks, test strategy" aria-label="Plan — the architect's read-out"><span class="st-dot"></span><span class="st-label">plan</span></button></li>
+      <li><button class="station" type="button" data-stage="build" data-tip="BE/FE implement the plan, small commits" aria-label="Build — backend and frontend output"><span class="st-dot"></span><span class="st-label">build</span></button></li>
+      <li><button class="station" type="button" data-stage="test" data-tip="QA's verdict — suite plus what it added" aria-label="Test — QA verdict and coverage"><span class="st-dot"></span><span class="st-label">test</span></button></li>
+      <li><button class="station" type="button" data-stage="review" data-tip="Reviewer verdict — bugs, security, performance" aria-label="Review — reviewer findings and verdict"><span class="st-dot"></span><span class="st-label">review</span></button></li>
+      <li><button class="station" type="button" data-stage="report" data-tip="The reporter's write-up — filed in reports/" aria-label="Report — the reporter's filed report"><span class="st-dot"></span><span class="st-label">report</span></button></li>
     </ol>
     <output id="elapsed" class="elapsed" aria-live="off"></output>
   </div>
