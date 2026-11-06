@@ -438,13 +438,28 @@ textarea::placeholder, input::placeholder { color: var(--faint); }
 .shift-time { color: var(--faint); font-variant-numeric: tabular-nums; }
 .shift-empty { font: 400 11px var(--font-ui); color: var(--faint); padding: 8px 2px 2px; }
 
+/* ============ crew setup — vitals + per-employee rows ============ */
+.settings-vitals {
+  display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 0 12px;
+  border-bottom: 1px solid var(--hairline); margin-bottom: 10px;
+}
+.vital-chip {
+  font: 400 10px/1.5 var(--font-mono); color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--hairline); border-radius: 999px;
+  padding: 4px 10px; white-space: nowrap;
+}
+.vital-chip b { color: var(--text); font-weight: 600; }
+.vital-note { font: 400 10px/1.5 var(--font-mono); color: var(--faint); padding: 2px 2px 10px; }
 /* ============ crew setup — per-employee rows ============ */
 .settings-body { display: flex; flex-direction: column; }
 .setting-row {
-  display: grid; grid-template-columns: 34px 1fr minmax(165px, 230px) auto; gap: 11px;
+  display: grid; grid-template-columns: 34px 1fr minmax(140px, 210px) 92px auto; gap: 10px;
   align-items: center; padding: 9px 2px; border-bottom: 1px solid var(--hairline);
 }
 .setting-row:last-child { border-bottom: 0; }
+.setting-usage { font: 400 9.5px/1.5 var(--font-mono); color: var(--faint); margin-top: 2px; }
+.setting-usage b { color: var(--steel); font-weight: 500; }
+.setting-effort { font-family: var(--font-mono); font-size: 10px; padding: 7px 6px; }
 .setting-code {
   width: 34px; height: 34px; display: grid; place-items: center;
   border: 1.5px solid var(--ink, var(--rust)); border-radius: 7px;

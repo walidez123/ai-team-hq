@@ -534,10 +534,22 @@ async function loadSettings() {
   try {
     const r = await fetch('/api/agents/settings');
     const data = await r.json();
+    renderVitals(data.consoleVitals);
     renderSettings(data);
   } catch {
     settingsBody.innerHTML = '<p class="panel-note" style="padding:10px 2px">Could not read the agent files.</p>';
   }
+}
+
+function renderVitals(v) {
+  const elx = $('#settingsVitals');
+  if (!v) { elx.innerHTML = ''; return; }
+  const chips = [
+    ['sessions', v.sessions], ['subagents', v.subagents], ['prompts', v.prompts],
+    ['steps', v.steps], ['tokens', v.tokens], ['tool success', v.toolSuccess],
+  ].filter(([, n]) => n);
+  elx.innerHTML = chips.map(([k, n]) => `<span class="vital-chip"><b>${n}</b> ${k}</span>`).join('') +
+    '<span class="vital-chip" title="The free lane does not publish remaining allowance">free quota: <b>remaining — not published</b></span>';
 }
 
 function renderSettings(data) {
@@ -549,6 +561,39 @@ function renderSettings(data) {
     code.style.setProperty('--ink', a.color);
     const meta = el('div');
     meta.append(el('div', 'setting-name', a.id), el('div', 'setting-blurb', a.blurb));
+    const u = a.usage || { total: 0, done: 0 };
+    const usage = el('div', 'setting-usage');
+    if (u.total > 0) {
+      const pct = Math.round((u.done / u.total) * 100);
+      usage.innerHTML = `<b>${u.total}</b> run${u.total === 1 ? '' : 's'} · <b>${pct}%</b> green`;
+    } else {
+      usage.textContent = 'no runs on record';
+    }
+    meta.appendChild(usage);
+
+    const save = el('span', 'setting-save', '');
+    let savedTimer = null;
+    const flash = (text, ok) => {
+      save.textContent = ok ? text : String(text).slice(0, 90);
+      save.classList.toggle('err', !ok);
+      save.classList.add('show');
+      clearTimeout(savedTimer);
+      savedTimer = setTimeout(() => save.classList.remove('show'), 3500);
+    };
+    const post = async (field, value) => {
+      save.textContent = 'saving…';
+      save.classList.remove('err');
+      save.classList.add('show');
+      try {
+        const r = await fetch('/api/agents/settings', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: a.id, [field]: value }),
+        });
+        const out = await r.json();
+        if (r.ok) flash('saved ✓', true); else flash(out.error || 'failed', false);
+      } catch (e) { flash(String(e.message || e), false); }
+    };
 
     const sel = document.createElement('select');
     sel.setAttribute('aria-label', `Model for ${a.id}`);
@@ -567,31 +612,21 @@ function renderSettings(data) {
       o.selected = true;
       sel.insertBefore(o, sel.firstChild);
     }
+    sel.addEventListener('change', () => post('model', sel.value));
 
-    const save = el('span', 'setting-save', '');
-    let savedTimer = null;
-    sel.addEventListener('change', async () => {
-      save.textContent = 'saving…';
-      save.classList.remove('err');
-      save.classList.add('show');
-      try {
-        const r = await fetch('/api/agents/settings', {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id: a.id, model: sel.value }),
-        });
-        const out = await r.json();
-        if (r.ok) { save.textContent = 'saved ✓'; }
-        else { save.textContent = (out.error || 'failed').slice(0, 90); save.classList.add('err'); }
-      } catch (e) {
-        save.textContent = String(e.message || e).slice(0, 90);
-        save.classList.add('err');
-      }
-      clearTimeout(savedTimer);
-      savedTimer = setTimeout(() => save.classList.remove('show'), 3500);
-    });
+    const effort = document.createElement('select');
+    effort.className = 'setting-effort';
+    effort.setAttribute('aria-label', `Reasoning effort for ${a.id}`);
+    for (const lvl of ['default', 'low', 'medium', 'high']) {
+      const o = document.createElement('option');
+      o.value = lvl;
+      o.textContent = lvl === 'default' ? 'effort · default' : `effort · ${lvl}`;
+      if ((a.effort || 'default') === lvl) o.selected = true;
+      effort.appendChild(o);
+    }
+    effort.addEventListener('change', () => post('effort', effort.value === 'default' ? '' : effort.value));
 
-    row.append(code, meta, sel, save);
+    row.append(code, meta, sel, effort, save);
     settingsBody.appendChild(row);
   }
 }

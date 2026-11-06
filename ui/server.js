@@ -156,6 +156,23 @@ function parseAgentFile(file) { return parseAgentFileAt(AGENTS_DIR, file); }
 const GLOBAL_AGENTS_DIR = path.join(os.homedir(), '.config', 'opencode', 'agents');
 let modelCatalogCache = { at: 0, list: [] };
 
+// machine-wide console vitals, parsed from `opencode stats` (best effort)
+function consoleVitals() {
+  try {
+    const out = execFileSync(OPENCODE, ['stats'], { encoding: 'utf8', timeout: 15000, windowsHide: true })
+      .replace(/\x1b\[[0-9;]*m/g, '');
+    const grab = re => { const m = out.match(re); return m ? m[1].trim() : null; };
+    return {
+      sessions: grab(/(\d+[\d,.]*)\s*sessions/i),
+      subagents: grab(/(\d+[\d,.]*)\s*subagents/i),
+      prompts: grab(/(\d+[\d,.]*)\s*prompts/i),
+      steps: grab(/([\d.km]+)\s*steps/i),
+      tokens: grab(/([\d.km]+)\s*tokens/i),
+      toolSuccess: grab(/([\d.]+%)\s*tool success/i),
+    };
+  } catch { return null; }
+}
+
 function getModelCatalog() {
   const FRESH = 10 * 60 * 1000; // 10 minutes
   if (Date.now() - modelCatalogCache.at < FRESH && modelCatalogCache.list.length) return modelCatalogCache.list;
@@ -171,24 +188,68 @@ function getModelCatalog() {
   }
 }
 
+function agentUsage() {
+  const per = {};
+  for (const r of readMetrics()) {
+    const a = per[r.agent] = per[r.agent] || { total: 0, done: 0, totalMs: 0 };
+    a.total += 1;
+    if (r.status === 'done') a.done += 1;
+    a.totalMs += r.durationMs || 0;
+  }
+  return per;
+}
+
 function agentSettingsPayload() {
   const catalog = getModelCatalog();
   const free = id => /-free$/.test(id);
+  const usage = agentUsage();
   return {
     catalog,
+    consoleVitals: consoleVitals(),
     agents: ROSTER.map(slot => {
       const local = parseAgentFileAt(AGENTS_DIR, slot.id + '.md');
       const globalOne = parseAgentFileAt(GLOBAL_AGENTS_DIR, slot.id + '.md');
+      let effort = 'default';
+      try {
+        const raw = fs.readFileSync(path.join(AGENTS_DIR, slot.id + '.md'), 'utf8');
+        const m = raw.match(/^reasoningEffort:\s*(\w+)$/mi);
+        if (m) effort = m[1].toLowerCase();
+      } catch { /* no file */ }
       return {
         id: slot.id, code: slot.code, no: slot.no, color: slot.color,
         blurb: slot.blurb,
         localModel: local && local.model || null,
         globalModel: globalOne && globalOne.model || null,
         effectiveModel: (local && local.model) || (globalOne && globalOne.model) || null,
+        usage: usage[slot.id] || { total: 0, done: 0, totalMs: 0 },
+        effort,
       };
     }),
     freeOnly: catalog.filter(free),
   };
+}
+
+const EFFORT_LEVELS = ['low', 'medium', 'high'];
+function setAgentEffort(id, effort) {
+  if (!ROSTER.some(s => s.id === id)) throw new Error(`unknown employee: ${id}`);
+  const level = String(effort || '').toLowerCase();
+  if (level && !EFFORT_LEVELS.includes(level)) throw new Error(`effort must be one of: ${EFFORT_LEVELS.join(', ')}, or empty for model default`);
+  const updated = [];
+  for (const dir of [GLOBAL_AGENTS_DIR, AGENTS_DIR]) {
+    const file = path.join(dir, id + '.md');
+    if (!fs.existsSync(file)) continue;
+    let content = fs.readFileSync(file, 'utf8');
+    // drop any existing reasoningEffort line, then re-add if a level is set
+    content = content.replace(/^reasoningEffort:[^\n]*\n?/mi, '');
+    if (level) {
+      content = /^model:.*$/m.test(content)
+        ? content.replace(/^model:.*$/m, m => `${m}\nreasoningEffort: ${level}`)
+        : content.replace(/\n---/, `\nreasoningEffort: ${level}\n---`);
+    }
+    fs.writeFileSync(file, content);
+    updated.push(dir);
+  }
+  return updated;
 }
 
 function setAgentModel(id, model) {
@@ -394,8 +455,14 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/agents/settings' && req.method === 'POST') {
       const body = JSON.parse(await readBody(req) || '{}');
       try {
-        const updated = setAgentModel(String(body.id || ''), String(body.model || ''));
-        return sendJson(res, 200, { ok: true, id: body.id, model: body.model, updated });
+        const id = String(body.id || '');
+        const model = String(body.model || '');
+        const effort = body.effort;
+        let updated = [];
+        if (model) updated = updated.concat(setAgentModel(id, model));
+        if (effort !== undefined) updated = updated.concat(setAgentEffort(id, effort));
+        if (!model && effort === undefined) throw new Error('nothing to change — pass model and/or effort');
+        return sendJson(res, 200, { ok: true, id, updated });
       } catch (e) {
         return sendJson(res, 400, { error: e.message });
       }

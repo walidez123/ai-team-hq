@@ -169,10 +169,11 @@
         <button class="guide-close" id="closeSettings" aria-label="Close settings">×</button>
       </header>
 
-      <div class="settings-body" id="settingsBody"></div>
+      <div class="settings-vitals" id="settingsVitals" aria-label="Machine usage summary"></div>
+    <div class="settings-body" id="settingsBody"></div>
 
       <footer class="guide-foot">
-        <small>Saved straight into <code>.opencode/agents/&lt;name&gt;.md</code> (global install + this project). Models ending in <code>-free</code> cost nothing today; the paid ones error on dispatch until you add keys.</small>
+        <small>Saved straight into <code>.opencode/agents/&lt;name&gt;.md</code> (global + this project). Models ending in <code>-free</code> cost nothing today; paid ones error on dispatch until you add keys. <b>Effort</b> is passed through as <code>reasoningEffort</code> if the model supports it. <b>Remaining free quota is not published</b> — OpenCode exposes consumption, not balance; watch for <code>FreeUsageLimitError</code>.</small>
         <button id="settingsDone" class="btn btn-assign">Done</button>
       </footer>
     </div>
