@@ -35,6 +35,12 @@
     <div class="masthead-right">
       <span id="conn" class="stamp-pill stamp-go" role="status">line clear</span>
       <time id="clock" class="clock" aria-label="Local time">--:--:--</time>
+      <button id="openSettings" class="help-btn" aria-label="Crew setup — assign models per employee" title="Crew setup">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.2"/>
+          <path d="M12 2.8v3M12 18.2v3M2.8 12h3M18.2 12h3M5.2 5.2l2.1 2.1M16.7 16.7l2.1 2.1M18.8 5.2l-2.1 2.1M7.3 16.7l-2.1 2.1"/>
+        </svg>
+      </button>
       <button id="openGuide" class="help-btn" aria-label="Open the field guide" title="Field guide ( ? )">?</button>
     </div>
   </header>
@@ -151,6 +157,27 @@
     <div class="stage-sheet-body" id="stageSheetBody"></div>
   </aside>
 
+  <!-- Crew setup overlay — per-employee model assignment -->
+  <div class="guide-overlay" id="settingsOverlay" role="dialog" aria-modal="true" aria-labelledby="settingsTitle" hidden>
+    <div class="guide-backdrop" data-settings-close></div>
+    <div class="guide-panel">
+      <header class="guide-head">
+        <div>
+          <h2 id="settingsTitle">Crew setup</h2>
+          <p>Assign a model to each employee. Applies to the <b>next dispatch</b> — runs already in flight are untouched.</p>
+        </div>
+        <button class="guide-close" id="closeSettings" aria-label="Close settings">×</button>
+      </header>
+
+      <div class="settings-body" id="settingsBody"></div>
+
+      <footer class="guide-foot">
+        <small>Saved straight into <code>.opencode/agents/&lt;name&gt;.md</code> (global install + this project). Models ending in <code>-free</code> cost nothing today; the paid ones error on dispatch until you add keys.</small>
+        <button id="settingsDone" class="btn btn-assign">Done</button>
+      </footer>
+    </div>
+  </div>
+
   <!-- Field guide overlay — opened by ? / masthead button / first visit -->
   <div class="guide-overlay" id="guideOverlay" role="dialog" aria-modal="true" aria-labelledby="guideTitle" hidden>
     <div class="guide-backdrop" data-guide-close></div>
@@ -164,7 +191,7 @@
       </header>
 
       <div class="guide-grid">
-        <div class="guide-item"><div class="guide-num">1</div><div><h3>Status pill & clock</h3><p>Top-right. <code>line clear</code> means nobody is working. <code>crew working (n)</code> means n agents have runs in flight. The stamp tilts green when the wire is free.</p></div></div>
+        <div class="guide-item"><div class="guide-num">1</div><div><h3>Masthead — status, clock, crew setup, guide</h3><p>Top-right. <code>line clear</code> means nobody is working; <code>crew working (n)</code> means n runs in flight. The <b>gear</b> opens Crew setup — assign a model to each employee (saved to their agent files; applies next dispatch). The <b>?</b> reopens this guide any time. <code>Esc</code> closes all three.</p></div></div>
 
         <div class="guide-item"><div class="guide-num">2</div><div><h3>The line rail</h3><p>The six stations a task passes through: intake, plan, build, test, review, report. Stations glow terracotta while a run is live and stamp sage when it's done — with an elapsed timer on the right edge. Click any station to open its drill-down: who owns it, their model, and what landed in the shift log there.</p></div></div>
 

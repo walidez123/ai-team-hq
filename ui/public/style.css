@@ -438,6 +438,29 @@ textarea::placeholder, input::placeholder { color: var(--faint); }
 .shift-time { color: var(--faint); font-variant-numeric: tabular-nums; }
 .shift-empty { font: 400 11px var(--font-ui); color: var(--faint); padding: 8px 2px 2px; }
 
+/* ============ crew setup — per-employee rows ============ */
+.settings-body { display: flex; flex-direction: column; }
+.setting-row {
+  display: grid; grid-template-columns: 34px 1fr minmax(165px, 230px) auto; gap: 11px;
+  align-items: center; padding: 9px 2px; border-bottom: 1px solid var(--hairline);
+}
+.setting-row:last-child { border-bottom: 0; }
+.setting-code {
+  width: 34px; height: 34px; display: grid; place-items: center;
+  border: 1.5px solid var(--ink, var(--rust)); border-radius: 7px;
+  color: var(--ink, var(--rust)); font: 600 11px/1 var(--font-mono); transform: rotate(-1.5deg);
+}
+.setting-name { font-weight: 600; font-size: 12.5px; }
+.setting-blurb { font-size: 10.5px; color: var(--muted); line-height: 1.4; margin-top: 2px; }
+.setting-row select { width: 100%; font-family: var(--font-mono); font-size: 10.5px; padding: 7px 30px 7px 8px; }
+.setting-save {
+  font: 400 9.5px var(--font-mono); letter-spacing: .04em; color: var(--ok);
+  min-width: 44px; text-align: right; opacity: 0; transition: opacity .25s;
+}
+.setting-save.show { opacity: 1; }
+.setting-save.err { color: var(--error); }
+@media (max-width: 640px) { .setting-row { grid-template-columns: 34px 1fr; } .setting-row select, .setting-save { grid-column: 2; } }
+
 /* ============ stage sheet — rail drill-down ============ */
 .stage-sheet {
   position: fixed; top: 0; right: 0; height: 100vh; width: min(400px, 96vw); z-index: 150;

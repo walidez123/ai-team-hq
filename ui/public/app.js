@@ -509,6 +509,93 @@ async function openStageSheet(key) {
 document.querySelectorAll('.station').forEach(b => b.addEventListener('click', () => openStageSheet(b.dataset.stage)));
 $('#closeStageSheet').addEventListener('click', closeStageSheet);
 
+/* ---------- crew setup (per-employee model) ---------- */
+const settingsOverlay = $('#settingsOverlay');
+const settingsBody = $('#settingsBody');
+let settingsPrevFocus = null;
+
+function openSettings() {
+  settingsPrevFocus = document.activeElement;
+  settingsOverlay.hidden = false;
+  $('#closeSettings').focus();
+  loadSettings();
+}
+function closeSettings() {
+  settingsOverlay.hidden = true;
+  if (settingsPrevFocus && settingsPrevFocus.focus) settingsPrevFocus.focus();
+}
+$('#openSettings').addEventListener('click', openSettings);
+$('#closeSettings').addEventListener('click', closeSettings);
+$('#settingsDone').addEventListener('click', closeSettings);
+settingsOverlay.addEventListener('click', (e) => { if (e.target.hasAttribute('data-settings-close')) closeSettings(); });
+
+async function loadSettings() {
+  settingsBody.innerHTML = '<p class="panel-note" style="padding:10px 2px">Reading the roster…</p>';
+  try {
+    const r = await fetch('/api/agents/settings');
+    const data = await r.json();
+    renderSettings(data);
+  } catch {
+    settingsBody.innerHTML = '<p class="panel-note" style="padding:10px 2px">Could not read the agent files.</p>';
+  }
+}
+
+function renderSettings(data) {
+  settingsBody.innerHTML = '';
+  const free = new Set(data.freeOnly || []);
+  for (const a of data.agents) {
+    const row = el('div', 'setting-row');
+    const code = el('span', 'setting-code', a.code);
+    code.style.setProperty('--ink', a.color);
+    const meta = el('div');
+    meta.append(el('div', 'setting-name', a.id), el('div', 'setting-blurb', a.blurb));
+
+    const sel = document.createElement('select');
+    sel.setAttribute('aria-label', `Model for ${a.id}`);
+    const current = a.effectiveModel || '';
+    for (const m of data.catalog) {
+      const o = document.createElement('option');
+      o.value = m;
+      o.textContent = m.replace(/^opencode\//, '') + (free.has(m) ? ' · free' : '');
+      if (m === current) o.selected = true;
+      sel.appendChild(o);
+    }
+    if (current && !data.catalog.includes(current)) {
+      const o = document.createElement('option');
+      o.value = current;
+      o.textContent = current.replace(/^opencode\//, '') + ' · current';
+      o.selected = true;
+      sel.insertBefore(o, sel.firstChild);
+    }
+
+    const save = el('span', 'setting-save', '');
+    let savedTimer = null;
+    sel.addEventListener('change', async () => {
+      save.textContent = 'saving…';
+      save.classList.remove('err');
+      save.classList.add('show');
+      try {
+        const r = await fetch('/api/agents/settings', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ id: a.id, model: sel.value }),
+        });
+        const out = await r.json();
+        if (r.ok) { save.textContent = 'saved ✓'; }
+        else { save.textContent = (out.error || 'failed').slice(0, 90); save.classList.add('err'); }
+      } catch (e) {
+        save.textContent = String(e.message || e).slice(0, 90);
+        save.classList.add('err');
+      }
+      clearTimeout(savedTimer);
+      savedTimer = setTimeout(() => save.classList.remove('show'), 3500);
+    });
+
+    row.append(code, meta, sel, save);
+    settingsBody.appendChild(row);
+  }
+}
+
 /* ---------- field guide ---------- */
 const guideOverlay = $('#guideOverlay');
 const openGuideBtn = $('#openGuide');
@@ -532,7 +619,7 @@ guideOverlay.addEventListener('click', (e) => { if (e.target.hasAttribute('data-
 
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '');
-  if (e.key === 'Escape') { if (!stageSheet.hidden) { closeStageSheet(); return; } if (!guideOverlay.hidden) closeGuide(); return; }
+  if (e.key === 'Escape') { if (!settingsOverlay.hidden) { closeSettings(); return; } if (!stageSheet.hidden) { closeStageSheet(); return; } if (!guideOverlay.hidden) closeGuide(); return; }
   if (typing) {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.closest && e.target.closest('#taskForm')) {
       e.preventDefault();

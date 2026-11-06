@@ -22,6 +22,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { execFile, execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');           // the "AI team" folder
@@ -137,10 +138,10 @@ function startRun({ task, agent, dir }) {
 }
 
 // ---------- agent frontmatter parsing (tiny, zero-dep) ----------
-function parseAgentFile(file) {
+function parseAgentFileAt(dir, file) {
   const name = path.basename(file, '.md');
   let content = '';
-  try { content = fs.readFileSync(path.join(AGENTS_DIR, file), 'utf8'); } catch { return null; }
+  try { content = fs.readFileSync(path.join(dir, file), 'utf8'); } catch { return null; }
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   const fm = m ? m[1] : '';
   const grab = (key) => {
@@ -148,6 +149,63 @@ function parseAgentFile(file) {
     return r ? r[1].trim().replace(/^['"]|['"]$/g, '') : null;
   };
   return { id: name, description: grab('description'), mode: grab('mode'), model: grab('model') };
+}
+function parseAgentFile(file) { return parseAgentFileAt(AGENTS_DIR, file); }
+
+// ---------- per-employee model settings ----------
+const GLOBAL_AGENTS_DIR = path.join(os.homedir(), '.config', 'opencode', 'agents');
+let modelCatalogCache = { at: 0, list: [] };
+
+function getModelCatalog() {
+  const FRESH = 10 * 60 * 1000; // 10 minutes
+  if (Date.now() - modelCatalogCache.at < FRESH && modelCatalogCache.list.length) return modelCatalogCache.list;
+  try {
+    const out = execFileSync(OPENCODE, ['models'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
+    const list = [...new Set(
+      out.split('\n').map(s => s.trim()).filter(l => /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/i.test(l))
+    )];
+    if (list.length) modelCatalogCache = { at: Date.now(), list };
+    return list;
+  } catch {
+    return modelCatalogCache.list; // stale is better than nothing
+  }
+}
+
+function agentSettingsPayload() {
+  const catalog = getModelCatalog();
+  const free = id => /-free$/.test(id);
+  return {
+    catalog,
+    agents: ROSTER.map(slot => {
+      const local = parseAgentFileAt(AGENTS_DIR, slot.id + '.md');
+      const globalOne = parseAgentFileAt(GLOBAL_AGENTS_DIR, slot.id + '.md');
+      return {
+        id: slot.id, code: slot.code, no: slot.no, color: slot.color,
+        blurb: slot.blurb,
+        localModel: local && local.model || null,
+        globalModel: globalOne && globalOne.model || null,
+        effectiveModel: (local && local.model) || (globalOne && globalOne.model) || null,
+      };
+    }),
+    freeOnly: catalog.filter(free),
+  };
+}
+
+function setAgentModel(id, model) {
+  if (!ROSTER.some(s => s.id === id)) throw new Error(`unknown employee: ${id}`);
+  const catalog = getModelCatalog();
+  if (catalog.length && !catalog.includes(model)) throw new Error(`model not in catalog: ${model} — run \`opencode models\` to see current free ones`);
+  const updated = [];
+  for (const dir of [GLOBAL_AGENTS_DIR, AGENTS_DIR]) {
+    const file = path.join(dir, id + '.md');
+    if (!fs.existsSync(file)) continue;
+    const before = fs.readFileSync(file, 'utf8');
+    if (!/^model:.*$/m.test(before)) { fs.writeFileSync(file, before.replace('\n---', `\nmodel: ${model}\n---`)); updated.push(dir + ' (model line added)'); continue; }
+    const after = before.replace(/^model:.*$/m, `model: ${model}`);
+    if (after !== before) { fs.writeFileSync(file, after); updated.push(dir); }
+  }
+  if (!updated.length) throw new Error(`no agent file found for ${id}`);
+  return updated;
 }
 
 function teamPayload() {
@@ -329,6 +387,18 @@ const server = http.createServer(async (req, res) => {
         return { ...slot, entries };
       });
       return sendJson(res, 200, { dir: target, agents });
+    }
+
+    // ---- crew settings (per-employee model assignment) ----
+    if (pathname === '/api/agents/settings' && req.method === 'GET') return sendJson(res, 200, agentSettingsPayload());
+    if (pathname === '/api/agents/settings' && req.method === 'POST') {
+      const body = JSON.parse(await readBody(req) || '{}');
+      try {
+        const updated = setAgentModel(String(body.id || ''), String(body.model || ''));
+        return sendJson(res, 200, { ok: true, id: body.id, model: body.model, updated });
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
     }
 
     if (pathname === '/api/metrics' && req.method === 'GET') return sendJson(res, 200, metricsSummary());
