@@ -18,6 +18,7 @@ const logEl = $('#log');
 const wireCursor = $('#wireCursor');
 const sendBtn = $('#sendBtn');
 const stopBtn = $('#stopBtn');
+const clearBtn = $('#clearBtn');
 const connPill = $('#conn');
 const rail = $('#rail');
 const elapsedEl = $('#elapsed');
@@ -319,6 +320,19 @@ stopBtn.addEventListener('click', async () => {
   if (!state.currentRunId) return;
   await fetch(`/api/runs/${encodeURIComponent(state.currentRunId)}/stop`, { method: 'POST' });
   logLine('stop requested — the crew will halt at the next safe point', 'ln-err');
+});
+clearBtn.addEventListener('click', () => {
+  const active = !!(state.es || state.currentRunId);
+  if (active && !confirm('A run is streaming. Clear the log display only?')) return;
+  const stale = logEl.querySelectorAll(':scope > .ln, :scope > .wire-empty');
+  stale.forEach(n => n.remove());
+  logEl.scrollTop = logEl.scrollHeight;
+  if (!active) {
+    const empty = document.createElement('p');
+    empty.className = 'wire-empty';
+    empty.textContent = 'Quiet on the wire. Assign a task — the crew plans it, builds it, tests it, reviews it and files a report, in that order.';
+    if (wireCursor) logEl.insertBefore(empty, wireCursor); else logEl.appendChild(empty);
+  }
 });
 $('#refreshReports').addEventListener('click', fetchReports);
 $('#projectSelect').addEventListener('change', (e) => {
