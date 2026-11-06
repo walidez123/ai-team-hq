@@ -40,14 +40,14 @@
   </header>
 
   <!-- The one signature element: the pipeline, drawn as a railroad line -->
-  <div class="rail-wrap" data-tip="The six stations a task moves through — they light up live while a run is active.">
-    <ol class="rail" id="rail" aria-label="Pipeline stages">
-      <li class="station" data-stage="intake"><span class="st-dot"></span><span class="st-label">intake</span></li>
-      <li class="station" data-stage="plan"><span class="st-dot"></span><span class="st-label">plan</span></li>
-      <li class="station" data-stage="build"><span class="st-dot"></span><span class="st-label">build</span></li>
-      <li class="station" data-stage="test"><span class="st-dot"></span><span class="st-label">test</span></li>
-      <li class="station" data-stage="review"><span class="st-dot"></span><span class="st-label">review</span></li>
-      <li class="station" data-stage="report"><span class="st-dot"></span><span class="st-label">report</span></li>
+  <div class="rail-wrap" data-tip="Click any station — see who owns it, what they ran, and what they filed.">
+    <ol class="rail" id="rail" aria-label="Pipeline stages — click a station for details">
+      <li><button class="station" type="button" data-stage="intake" aria-label="Intake — what came in, who took it"><span class="st-dot"></span><span class="st-label">intake</span></button></li>
+      <li><button class="station" type="button" data-stage="plan" aria-label="Plan — the architect's read-out"><span class="st-dot"></span><span class="st-label">plan</span></button></li>
+      <li><button class="station" type="button" data-stage="build" aria-label="Build — backend and frontend output"><span class="st-dot"></span><span class="st-label">build</span></button></li>
+      <li><button class="station" type="button" data-stage="test" aria-label="Test — QA verdict and coverage"><span class="st-dot"></span><span class="st-label">test</span></button></li>
+      <li><button class="station" type="button" data-stage="review" aria-label="Review — reviewer findings and verdict"><span class="st-dot"></span><span class="st-label">review</span></button></li>
+      <li><button class="station" type="button" data-stage="report" aria-label="Report — the reporter's filed report"><span class="st-dot"></span><span class="st-label">report</span></button></li>
     </ol>
     <output id="elapsed" class="elapsed" aria-live="off"></output>
   </div>
@@ -139,6 +139,18 @@
     <span>Set in Archivo &amp; IBM Plex Mono · <span id="reportCount">0</span> reports on file</span>
   </footer>
 
+  <!-- Stage sheet — opens when a rail station is clicked -->
+  <aside class="stage-sheet" id="stageSheet" role="dialog" aria-modal="false" aria-labelledby="stageTitle" hidden>
+    <header class="stage-sheet-head">
+      <div class="stage-sheet-title">
+        <span class="stage-eyebrow">station</span>
+        <h2 id="stageTitle">plan</h2>
+      </div>
+      <button class="guide-close" id="closeStageSheet" aria-label="Close stage detail">×</button>
+    </header>
+    <div class="stage-sheet-body" id="stageSheetBody"></div>
+  </aside>
+
   <!-- Field guide overlay — opened by ? / masthead button / first visit -->
   <div class="guide-overlay" id="guideOverlay" role="dialog" aria-modal="true" aria-labelledby="guideTitle" hidden>
     <div class="guide-backdrop" data-guide-close></div>
@@ -154,7 +166,7 @@
       <div class="guide-grid">
         <div class="guide-item"><div class="guide-num">1</div><div><h3>Status pill & clock</h3><p>Top-right. <code>line clear</code> means nobody is working. <code>crew working (n)</code> means n agents have runs in flight. The stamp tilts green when the wire is free.</p></div></div>
 
-        <div class="guide-item"><div class="guide-num">2</div><div><h3>The line rail</h3><p>The six stations a task passes through: intake, plan, build, test, review, report. Stations glow terracotta while a run is live and stamp sage when it's done — with an elapsed timer on the right edge.</p></div></div>
+        <div class="guide-item"><div class="guide-num">2</div><div><h3>The line rail</h3><p>The six stations a task passes through: intake, plan, build, test, review, report. Stations glow terracotta while a run is live and stamp sage when it's done — with an elapsed timer on the right edge. Click any station to open its drill-down: who owns it, their model, and what landed in the shift log there.</p></div></div>
 
         <div class="guide-item"><div class="guide-num">3</div><div><h3>Console vitals</h3><p>One honest line: how many runs the team has filed, what percentage ended green, average run time, and how the last one went. It's journaled in <code>reports/.metrics.jsonl</code> — nothing hidden, nothing averaged over.</p></div></div>
 

@@ -396,13 +396,13 @@ function renderShiftView(data) {
     shiftView.appendChild(row);
   }
 }
+async function fetchJournalData() {
+  const dir = $('#dirInput').value.trim();
+  const r = await fetch('/api/journal' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
+  return r.json();
+}
 async function fetchJournal() {
-  try {
-    const dir = $('#dirInput').value.trim();
-    const r = await fetch('/api/journal' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
-    const data = await r.json();
-    renderShiftView(data);
-  } catch { /* leave the panel as-is */ }
+  try { renderShiftView(await fetchJournalData()); } catch { /* leave the panel as-is */ }
 }
 shiftViewBtn.addEventListener('click', () => {
   shiftsOn = !shiftsOn;
@@ -412,6 +412,102 @@ shiftViewBtn.addEventListener('click', () => {
   shiftView.hidden = !shiftsOn;
   if (shiftsOn) fetchJournal();
 });
+
+/* ---------- stage sheet (rail drill-down) ---------- */
+const STAGE_DEFS = {
+  intake: { owners: ['dispatcher'] },
+  plan:   { owners: ['architect'] },
+  build:  { owners: ['backend', 'frontend'] },
+  test:   { owners: ['qa'] },
+  review: { owners: ['reviewer'] },
+  report: { owners: ['reporter'] },
+};
+const stageSheet = $('#stageSheet');
+const stageTitle = $('#stageTitle');
+const stageBody = $('#stageSheetBody');
+let stagePrevFocus = null;
+
+function ownerById(id) { return (state.roster || []).find(a => a.id === id); }
+function closeStageSheet() {
+  stageSheet.hidden = true;
+  if (stagePrevFocus && stagePrevFocus.focus) stagePrevFocus.focus();
+}
+function journalSummaryFor(owner, e) {
+  return owner + ': ' + (e.summary || '');
+}
+
+async function openStageSheet(key) {
+  const def = STAGE_DEFS[key]; if (!def) return;
+  stageTitle.textContent = key;
+  stageBody.innerHTML = '';
+
+  // who owns this station
+  const secOwners = el('div', 'stage-section');
+  secOwners.appendChild(el('h3', null, 'handled by'));
+  const ownersWrap = el('div', 'stage-owners');
+  for (const id of def.owners) {
+    const a = ownerById(id);
+    const chip = el('div', 'owner-chip');
+    const code = el('span', 'owner-code', (a && a.code) || id.slice(0, 2).toUpperCase());
+    code.style.setProperty('--ink', (a && a.color) || '#d97757');
+    const meta = el('div');
+    meta.append(el('div', 'owner-name', id), el('div', 'owner-model', String((a && a.model) || '').replace(/^opencode\//, '')));
+    chip.append(code, meta);
+    ownersWrap.appendChild(chip);
+  }
+  secOwners.appendChild(ownersWrap);
+  stageBody.appendChild(secOwners);
+
+  // intake also shows what the last run was
+  if (key === 'intake') {
+    const sec = el('div', 'stage-section');
+    sec.appendChild(el('h3', null, 'last run in this project'));
+    const box = el('div', 'stage-run');
+    try {
+      const m = await fetch('/api/metrics').then(r => r.json());
+      if (m && m.last) {
+        box.append('dispatched to ', el('b', null, m.last.agent), ' · ');
+        const s = el('span', m.last.status === 'done' ? 'run-ok' : 'run-bad', m.last.status);
+        box.append(s, el('br'), document.createTextNode(m.last.task || '—'));
+      } else {
+        box.textContent = 'No runs on record — assign the crew a task first.';
+      }
+    } catch { box.textContent = 'Metrics unavailable.'; }
+    sec.appendChild(box);
+    stageBody.appendChild(sec);
+  }
+
+  // what the shift log holds for this station
+  const secJ = el('div', 'stage-section');
+  secJ.appendChild(el('h3', null, 'from the shift log'));
+  let data = null;
+  try { data = await fetchJournalData(); } catch { /* fall through to empty state */ }
+  const entries = [];
+  for (const id of def.owners) {
+    const a = data && data.agents.find(x => x.id === id);
+    if (a) for (const e of a.entries) entries.push({ ...e, owner: id });
+  }
+  entries.sort((x, y) => String(x.ts || '').localeCompare(String(y.ts || '')));
+  if (!entries.length) {
+    secJ.appendChild(el('div', 'stage-empty', 'Nothing filed at this station yet. Journal lines land here when the crew finishes work — dispatch a task in this project and watch it.'));
+  } else {
+    for (const e of entries.slice(-6)) {
+      const row = el('div', 'stage-entry');
+      const dot = el('span', `stage-dot ${e.status || 'done'}`);
+      const time = el('span', 'stage-entry-time', e.ts ? new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '--:--');
+      row.append(dot, time, el('div', 'stage-entry-summary', journalSummaryFor(e.owner, e)));
+      secJ.appendChild(row);
+    }
+  }
+  stageBody.appendChild(secJ);
+
+  stagePrevFocus = document.activeElement;
+  stageSheet.hidden = false;
+  $('#closeStageSheet').focus();
+}
+
+document.querySelectorAll('.station').forEach(b => b.addEventListener('click', () => openStageSheet(b.dataset.stage)));
+$('#closeStageSheet').addEventListener('click', closeStageSheet);
 
 /* ---------- field guide ---------- */
 const guideOverlay = $('#guideOverlay');
@@ -436,7 +532,7 @@ guideOverlay.addEventListener('click', (e) => { if (e.target.hasAttribute('data-
 
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '');
-  if (e.key === 'Escape') { if (!guideOverlay.hidden) closeGuide(); return; }
+  if (e.key === 'Escape') { if (!stageSheet.hidden) { closeStageSheet(); return; } if (!guideOverlay.hidden) closeGuide(); return; }
   if (typing) {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.closest && e.target.closest('#taskForm')) {
       e.preventDefault();
