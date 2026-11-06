@@ -1,7 +1,7 @@
 ---
 description: Architect. Produces the implementation plan — goal, files to touch, risks, test strategy — before any code is written. Invoke with @architect.
 mode: subagent
-model: opencode/deepseek-v4.1-flash-free
+model: opencode/pulse-alpha-free
 permission:
   edit: deny
   bash:

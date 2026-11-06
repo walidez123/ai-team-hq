@@ -10,6 +10,7 @@ const state = {
   elapsedTimer: null,
   runStartedAt: null,
   litCount: 0,
+  currentReportsDir: '',
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -171,6 +172,7 @@ async function registerCurrentFolder() {
   if (!r.ok) return logLine(`not registered: ${data.error || 'unknown error'} — double-check the folder exists on disk`, 'ln-err');
   logLine(`registered “${data.path}” — it will appear under known projects`, 'ln-done');
   loadProjects();
+  fetchReports();
 }
 async function createProject() {
   const name = $('#newProjectName').value.trim();
@@ -189,6 +191,7 @@ async function createProject() {
   $('#newProjectPanel').hidden = true;
   $('#toggleNewProject').setAttribute('aria-expanded', 'false');
   loadProjects();
+  fetchReports();
 }
 
 /* ---------- run metrics ---------- */
@@ -217,20 +220,33 @@ async function fetchMetrics() {
   } catch { /* strip stays as-is */ }
 }
 
-/* ---------- reports ---------- */
+/* ---------- reports (follows the selected project folder) ---------- */
+function selectedDir() {
+  return ($('#dirInput')?.value || '').trim();
+}
 async function fetchReports() {
   try {
-    const r = await fetch('/api/reports');
+    const dir = selectedDir();
+    const r = await fetch('/api/reports' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
     const data = await r.json();
+    state.currentReportsDir = data.dir || '';
     $('#reportCount').textContent = String(data.reports.length);
     const note = $('#filedNote'); if (note) note.textContent = `${data.reports.length} on file`;
+    const title = $('#reportTitle');
+    const ledgerDir = $('#ledgerDir');
+    if (ledgerDir) ledgerDir.textContent = state.currentReportsDir ? `${state.currentReportsDir}\\` : '';
+    if (!data.reports.length) {
+      if (title) title.textContent = 'Nothing here';
+      const body = $('#reportBody'); if (body) body.textContent = 'Nothing filed yet.' + (state.currentReportsDir ? '\n\n' + state.currentReportsDir + '\\' : '');
+    }
     const list = $('#reportList');
     list.innerHTML = '';
     if (!data.reports.length) {
       const d = document.createElement('p');
       d.className = 'panel-note';
       d.style.padding = '2px 2px 8px';
-      d.textContent = 'Nothing filed yet.';
+      const selected = state.currentReportsDir;
+      d.textContent = selected ? `Nothing filed yet in ${selected}\\ — dispatch a task in this project.` : 'Nothing filed yet.';
       list.appendChild(d);
       return;
     }
@@ -251,7 +267,8 @@ async function openReport(name) {
   $('#reportBody').textContent = 'Opening…';
   document.querySelectorAll('.slip').forEach(s => s.classList.toggle('selected', s.dataset.name === name));
   try {
-    const r = await fetch('/api/reports/' + encodeURIComponent(name));
+    const dir = selectedDir();
+    const r = await fetch('/api/reports/' + encodeURIComponent(name) + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
     const data = await r.json();
     $('#reportBody').textContent = data.content || '(empty file)';
   } catch {
@@ -350,6 +367,12 @@ $('#projectSelect').addEventListener('change', (e) => {
   if (!e.target.value) return;
   $('#dirInput').value = e.target.value;
   localStorage.setItem('hq.dir', e.target.value);
+  fetchReports();
+  if (shiftsOn) fetchJournal();
+});
+$('#dirInput').addEventListener('change', () => {
+  localStorage.setItem('hq.dir', $('#dirInput').value.trim());
+  fetchReports();
 });
 $('#registerProjectBtn').addEventListener('click', registerCurrentFolder);
 $('#toggleNewProject').addEventListener('click', () => {
@@ -360,7 +383,6 @@ $('#toggleNewProject').addEventListener('click', () => {
 });
 $('#createProjectBtn').addEventListener('click', createProject);
 $('#dirInput').value = localStorage.getItem('hq.dir') || '';
-$('#dirInput').addEventListener('change', () => localStorage.setItem('hq.dir', $('#dirInput').value.trim()));
 
 fetchTeam();
 fetchReports();

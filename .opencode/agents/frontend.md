@@ -1,7 +1,7 @@
 ---
 description: Frontend developer. Implements UI — components, styling, client behavior, accessibility — per the architect's plan. Invoke with @frontend.
 mode: subagent
-model: opencode/glm-5.3-flash-free
+model: opencode/crouton-alpha-free
 permission:
   edit: allow
   bash:

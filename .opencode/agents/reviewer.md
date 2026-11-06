@@ -1,7 +1,7 @@
 ---
 description: Code reviewer. Read-only review of the final diff — correctness, security, performance, maintainability. Cannot edit files. Invoke with @reviewer.
 mode: subagent
-model: opencode/deepseek-v4.1-flash-free
+model: opencode/flint-40b-free
 permission:
   edit: deny
   bash:

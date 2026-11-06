@@ -1,7 +1,7 @@
 ---
 description: Backend developer. Implements server-side code — APIs, data layer, business logic — per the architect's plan. Invoke with @backend.
 mode: subagent
-model: opencode/glm-5.3-flash-free
+model: opencode/beam-free
 permission:
   edit: allow
   bash:

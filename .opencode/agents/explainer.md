@@ -1,7 +1,7 @@
 ---
 description: Explainer. Reads the project end to end and writes docs/PROJECT-GUIDE.md — purpose, stack, how to run/test, architecture and module map, data flow, conventions, gotchas. Source stays read-only; writes only to docs/. Invoke with @explainer.
 mode: subagent
-model: opencode/deepseek-v4.1-flash-free
+model: opencode/nemotron-3.5-lightning-free
 permission:
   edit:
     "*": deny

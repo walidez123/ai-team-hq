@@ -424,21 +424,28 @@ function metricsSummary() {
   };
 }
 
-// ---------- reports ----------
-function listReports() {
-  if (!fs.existsSync(REPORTS)) return [];
-  return fs.readdirSync(REPORTS)
+// ---------- reports (project-aware: mirrors dispatch/journal) ----------
+function resolveReportsDir(targetDir) {
+  const normalized = targetDir && typeof targetDir === 'string' ? path.resolve(targetDir) : ROOT;
+  if (path.isAbsolute(normalized) && isDir(normalized)) return path.join(normalized, 'reports');
+  return REPORTS;
+}
+function listReports(targetDir) {
+  const reportsDir = resolveReportsDir(targetDir);
+  if (!fs.existsSync(reportsDir)) return [];
+  return fs.readdirSync(reportsDir)
     .filter(f => f.endsWith('.md'))
     .map(f => {
-      const st = fs.statSync(path.join(REPORTS, f));
+      const st = fs.statSync(path.join(reportsDir, f));
       return { name: f, size: st.size, mtime: st.mtime.toISOString() };
     })
     .sort((a, b) => b.mtime.localeCompare(a.mtime));
 }
 
-function readReport(name) {
-  const resolved = path.resolve(REPORTS, name);
-  if (!resolved.startsWith(REPORTS + path.sep) || !resolved.endsWith('.md') || !fs.existsSync(resolved)) {
+function readReport(name, targetDir) {
+  const reportsDir = resolveReportsDir(targetDir);
+  const resolved = path.resolve(reportsDir, name);
+  if (!resolved.startsWith(reportsDir + path.sep) || !resolved.endsWith('.md') || !fs.existsSync(resolved)) {
     return null;
   }
   return fs.readFileSync(resolved, 'utf8');
@@ -469,10 +476,10 @@ const server = http.createServer(async (req, res) => {
   try {
     // ---- API ----
     if (pathname === '/api/team' && req.method === 'GET') return sendJson(res, 200, { roster: teamPayload(), opencode: OPENCODE });
-    if (pathname === '/api/reports' && req.method === 'GET') return sendJson(res, 200, { reports: listReports() });
+    if (pathname === '/api/reports' && req.method === 'GET') return sendJson(res, 200, { dir: resolveReportsDir(url.searchParams.get('dir')), reports: listReports(url.searchParams.get('dir')) });
     if (pathname.startsWith('/api/reports/') && req.method === 'GET') {
       const name = decodeURIComponent(pathname.slice('/api/reports/'.length));
-      const md = readReport(name);
+      const md = readReport(name, url.searchParams.get('dir'));
       return md === null ? sendJson(res, 404, { error: 'not found' }) : sendJson(res, 200, { name, content: md });
     }
     // ---- shift log (per-employee journals in the project being worked on) ----
