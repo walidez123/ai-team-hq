@@ -397,20 +397,27 @@ function scaffoldProject({ name, targetPath }) {
 }
 
 // ---------- run metrics (JSONL, honest history — never breaks a run) ----------
+let metricsCache = { key: null, rows: null };
 function appendMetric(entry) {
   try {
     fs.mkdirSync(path.dirname(METRICS_FILE), { recursive: true });
     fs.appendFileSync(METRICS_FILE, JSON.stringify(entry) + '\n');
   } catch { /* metrics are best-effort */ }
+  metricsCache = { key: null, rows: null };
 }
 function readMetrics() {
   try {
-    return fs.readFileSync(METRICS_FILE, 'utf8')
+    const st = fs.statSync(METRICS_FILE);
+    const key = st.mtimeMs + ':' + st.size;
+    if (metricsCache.key === key && Array.isArray(metricsCache.rows)) return metricsCache.rows;
+    const rows = fs.readFileSync(METRICS_FILE, 'utf8')
       .split('\n')
       .filter(Boolean)
       .map(l => { try { return JSON.parse(l); } catch { return null; } })
       .filter(Boolean);
-  } catch { return []; }
+    metricsCache = { key, rows };
+    return rows;
+  } catch { metricsCache = { key: null, rows: null }; return []; }
 }
 function metricsSummary() {
   const rows = readMetrics();
