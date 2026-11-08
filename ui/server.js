@@ -164,6 +164,7 @@ function parseAgentFileAt(dir, file) {
   const name = path.basename(file, '.md');
   let content = '';
   try { content = fs.readFileSync(path.join(dir, file), 'utf8'); } catch { return null; }
+  if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   const fm = m ? m[1] : '';
   const grab = (key) => {
@@ -291,7 +292,8 @@ async function agentSettingsPayload() {
       const globalOne = parseAgentFileAt(GLOBAL_AGENTS_DIR, slot.id + '.md');
       let effort = 'default';
       try {
-        const raw = fs.readFileSync(path.join(AGENTS_DIR, slot.id + '.md'), 'utf8');
+        let raw = fs.readFileSync(path.join(AGENTS_DIR, slot.id + '.md'), 'utf8');
+        if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
         const m = raw.match(/^reasoningEffort:\s*(\w+)$/mi);
         if (m) effort = m[1].toLowerCase();
       } catch { /* no file */ }
@@ -381,7 +383,8 @@ async function setAgentModel(id, model) {
 
 function agentEffortOf(file) {
   try {
-    const raw = fs.readFileSync(file, 'utf8');
+    let raw = fs.readFileSync(file, 'utf8');
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
     const m = raw.match(/^reasoningEffort:\s*(\w+)$/mi);
     return m ? m[1].toLowerCase() : 'default';
   } catch { return 'default'; }
