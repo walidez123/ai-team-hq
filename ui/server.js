@@ -84,13 +84,15 @@ function startRun({ task, agent, dir }) {
     id, task, agent: agent || 'dispatcher', dir: cwd,
     startedAt: new Date().toISOString(), endedAt: null,
     status: 'running', exitCode: null, error: null,
+    stopRequested: false,
     events: [], clients: new Set(), child: null,
   };
   const args = ['run', '--standalone', '--format', 'json', '--auto', '--agent', run.agent, '--title', `hq:${id}`, task];
   const child = execFile(OPENCODE, args, { cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }, (err) => {
     run.endedAt = new Date().toISOString();
-    run.exitCode = err && typeof err.code === 'number' ? err.code : 0;
-    run.status = err ? 'error' : 'done';
+    run.exitCode = err ? (typeof err.code === 'number' ? err.code : null) : 0;
+    run.status = (run.stopRequested || (err && (err.killed || err.signal))) ? 'stopped' : (err ? 'error' : 'done');
+    run.error = run.status === 'error' ? String((err && err.message) || '') : null;
     pushEvent(run, { kind: 'status', status: run.status, exitCode: run.exitCode, endedAt: run.endedAt });
     appendMetric({
       id: run.id, agent: run.agent, dir: run.dir,
@@ -98,6 +100,7 @@ function startRun({ task, agent, dir }) {
       startedAt: run.startedAt, endedAt: run.endedAt,
       durationMs: Math.max(0, new Date(run.endedAt) - new Date(run.startedAt)),
       status: run.status, exitCode: run.exitCode,
+      signal: run.status === 'stopped' ? ((err && err.signal) || null) : undefined,
       eventCount: run.events.length,
     });
     for (const res of run.clients) { try { res.end(); } catch {} }
@@ -132,12 +135,28 @@ function startRun({ task, agent, dir }) {
     const i = list.findIndex(p => normalizePathKey(p && p.path) === key);
     if (i >= 0) { list[i].lastUsed = new Date().toISOString(); writeRegistry(list); }
   } catch { /* not a registered project */ }
-  // keep map bounded
+  // keep map bounded: evict oldest non-running run (never a live one)
   if (runs.size > MAX_RUNS_KEPT) {
-    const oldest = [...runs.keys()][0];
-    runs.delete(oldest);
+    let victim = null;
+    for (const r of runs.values()) {
+      if (r.status !== 'running') { victim = r.id; break; }
+    }
+    if (victim) runs.delete(victim);
   }
   return run;
+}
+
+function stopRun(run) {
+  if (!run || run.status !== 'running' || !run.child || !run.child.pid) return false;
+  run.stopRequested = true;
+  if (process.platform === 'win32') {
+    execFile('taskkill', ['/pid', String(run.child.pid), '/T', '/F'], { windowsHide: true }, (err) => {
+      if (err) { try { run.child.kill(); } catch (e) { /* best effort */ } }
+    });
+  } else {
+    try { run.child.kill('SIGTERM'); } catch (e) { /* best effort */ }
+  }
+  return true;
 }
 
 // ---------- agent frontmatter parsing (tiny, zero-dep) ----------
@@ -168,38 +187,85 @@ function knownAgentIds() {
   }
   return ids;
 }
-let modelCatalogCache = { at: 0, list: [] };
+let modelCatalogCache = { at: 0, list: [], inflight: null };
+let consoleVitalsCache = { at: 0, value: null, has: false, inflight: null };
+
+function fetchConsoleVitals() {
+  return new Promise((resolve) => {
+    execFile(OPENCODE, ['stats'], { encoding: 'utf8', timeout: 15000, windowsHide: true }, (err, stdout) => {
+      if (err) { resolve(null); return; }
+      const out = String(stdout || '').replace(/\x1b\[[0-9;]*m/g, '');
+      const grab = re => { const m = out.match(re); return m ? m[1].trim() : null; };
+      resolve({
+        sessions: grab(/(\d+[\d,.]*)\s*sessions/i),
+        subagents: grab(/(\d+[\d,.]*)\s*subagents/i),
+        prompts: grab(/(\d+[\d,.]*)\s*prompts/i),
+        steps: grab(/([\d.km]+)\s*steps/i),
+        tokens: grab(/([\d.km]+)\s*tokens/i),
+        toolSuccess: grab(/([\d.]+%)\s*tool success/i),
+      });
+    });
+  });
+}
 
 // machine-wide console vitals, parsed from `opencode stats` (best effort)
+// 5-min TTL cache + stale-while-revalidate: if a cached value exists but is
+// stale, return it immediately and refresh in the background.
 function consoleVitals() {
-  try {
-    const out = execFileSync(OPENCODE, ['stats'], { encoding: 'utf8', timeout: 15000, windowsHide: true })
-      .replace(/\x1b\[[0-9;]*m/g, '');
-    const grab = re => { const m = out.match(re); return m ? m[1].trim() : null; };
-    return {
-      sessions: grab(/(\d+[\d,.]*)\s*sessions/i),
-      subagents: grab(/(\d+[\d,.]*)\s*subagents/i),
-      prompts: grab(/(\d+[\d,.]*)\s*prompts/i),
-      steps: grab(/([\d.km]+)\s*steps/i),
-      tokens: grab(/([\d.km]+)\s*tokens/i),
-      toolSuccess: grab(/([\d.]+%)\s*tool success/i),
-    };
-  } catch { return null; }
+  const FRESH = 5 * 60 * 1000;
+  const now = Date.now();
+  if (consoleVitalsCache.has && (now - consoleVitalsCache.at < FRESH)) {
+    return Promise.resolve(consoleVitalsCache.value);
+  }
+  // stale cache present: kick off a background refresh, serve stale now
+  if (consoleVitalsCache.has && !consoleVitalsCache.inflight) {
+    const p = fetchConsoleVitals().then(v => {
+      consoleVitalsCache.value = v;
+      consoleVitalsCache.has = true;
+      consoleVitalsCache.at = Date.now();
+      return v;
+    }).catch(() => consoleVitalsCache.value).finally(() => { consoleVitalsCache.inflight = null; });
+    consoleVitalsCache.inflight = p;
+  }
+  if (consoleVitalsCache.has) {
+    return Promise.resolve(consoleVitalsCache.value);
+  }
+  // no cached value: fetch and await
+  if (!consoleVitalsCache.inflight) {
+    const p = fetchConsoleVitals().then(v => {
+      consoleVitalsCache.value = v;
+      consoleVitalsCache.has = true;
+      consoleVitalsCache.at = Date.now();
+      return v;
+    }).catch(() => null).finally(() => { consoleVitalsCache.inflight = null; });
+    consoleVitalsCache.inflight = p;
+  }
+  return consoleVitalsCache.inflight;
+}
+
+function fetchModelCatalog() {
+  return new Promise((resolve) => {
+    execFile(OPENCODE, ['models'], { encoding: 'utf8', timeout: 15000, windowsHide: true }, (err, stdout) => {
+      if (err) { resolve(modelCatalogCache.list); return; }
+      const list = [...new Set(
+        String(stdout || '').split('\n').map(s => s.trim()).filter(l => /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/i.test(l))
+      )];
+      if (list.length) { modelCatalogCache.list = list; modelCatalogCache.at = Date.now(); }
+      resolve(modelCatalogCache.list);
+    });
+  });
 }
 
 function getModelCatalog() {
   const FRESH = 10 * 60 * 1000; // 10 minutes
-  if (Date.now() - modelCatalogCache.at < FRESH && modelCatalogCache.list.length) return modelCatalogCache.list;
-  try {
-    const out = execFileSync(OPENCODE, ['models'], { encoding: 'utf8', timeout: 15000, windowsHide: true });
-    const list = [...new Set(
-      out.split('\n').map(s => s.trim()).filter(l => /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/i.test(l))
-    )];
-    if (list.length) modelCatalogCache = { at: Date.now(), list };
-    return list;
-  } catch {
-    return modelCatalogCache.list; // stale is better than nothing
+  const now = Date.now();
+  if (modelCatalogCache.list.length && (now - modelCatalogCache.at < FRESH)) {
+    return Promise.resolve(modelCatalogCache.list);
   }
+  if (modelCatalogCache.inflight) return modelCatalogCache.inflight;
+  const p = fetchModelCatalog().finally(() => { modelCatalogCache.inflight = null; });
+  modelCatalogCache.inflight = p;
+  return p;
 }
 
 function agentUsage() {
@@ -213,13 +279,13 @@ function agentUsage() {
   return per;
 }
 
-function agentSettingsPayload() {
-  const catalog = getModelCatalog();
+async function agentSettingsPayload() {
+  const catalog = await getModelCatalog();
   const free = id => /-free$/.test(id);
   const usage = agentUsage();
   return {
     catalog,
-    consoleVitals: consoleVitals(),
+    consoleVitals: await consoleVitals(),
     agents: ROSTER.map(slot => {
       const local = parseAgentFileAt(AGENTS_DIR, slot.id + '.md');
       const globalOne = parseAgentFileAt(GLOBAL_AGENTS_DIR, slot.id + '.md');
@@ -251,8 +317,8 @@ const PREFERRED_FREE = {
   reporter:   'opencode/mimo-v2.6-flash-free',        // writing-flavored
 };
 
-function distributeFreeModels() {
-  const catalog = getModelCatalog();
+async function distributeFreeModels() {
+  const catalog = await getModelCatalog();
   const free = catalog.filter(m => /-free$/i.test(m));
   if (free.length === 0) throw new Error('the free catalog is empty right now — check `opencode models`');
   const remaining = new Set(free);
@@ -266,7 +332,7 @@ function distributeFreeModels() {
   }
   const updated = [];
   for (const [id, model] of Object.entries(assignment)) {
-    for (const dir of setAgentModel(id, model)) updated.push(dir);
+    for (const dir of await setAgentModel(id, model)) updated.push(dir);
   }
   return { assignment, spare: [...remaining], totalFree: free.length, updated: updated.length };
 }
@@ -294,9 +360,9 @@ function setAgentEffort(id, effort) {
   return updated;
 }
 
-function setAgentModel(id, model) {
+async function setAgentModel(id, model) {
   if (!ROSTER.some(s => s.id === id)) throw new Error(`unknown employee: ${id}`);
-  const catalog = getModelCatalog();
+  const catalog = await getModelCatalog();
   if (catalog.length && !catalog.includes(model)) throw new Error(`model not in catalog: ${model} — run \`opencode models\` to see current free ones`);
   const updated = [];
   let found = false;
@@ -423,6 +489,7 @@ function metricsSummary() {
   const rows = readMetrics();
   const total = rows.length;
   const done = rows.filter(r => r.status === 'done').length;
+  const stopped = rows.filter(r => r.status === 'stopped').length;
   const durations = rows.map(r => r.durationMs).filter(n => typeof n === 'number' && n >= 0);
   const perAgent = {};
   for (const r of rows) {
@@ -434,7 +501,8 @@ function metricsSummary() {
   return {
     total,
     done,
-    errors: total - done,
+    stopped,
+    errors: total - done - stopped,
     successRate: total ? Math.round((done / total) * 100) : null,
     avgDurationMs: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null,
     perAgent,
@@ -540,7 +608,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ---- crew settings (per-employee model assignment) ----
-    if (pathname === '/api/agents/settings' && req.method === 'GET') return sendJson(res, 200, agentSettingsPayload());
+    if (pathname === '/api/agents/settings' && req.method === 'GET') return sendJson(res, 200, await agentSettingsPayload());
     if (pathname === '/api/agents/settings' && req.method === 'POST') {
       const body = await readJson(req);
       try {
@@ -548,7 +616,7 @@ const server = http.createServer(async (req, res) => {
         const model = String(body.model || '');
         const effort = body.effort;
         let updated = [];
-        if (model) updated = updated.concat(setAgentModel(id, model));
+        if (model) updated = updated.concat(await setAgentModel(id, model));
         if (effort !== undefined) updated = updated.concat(setAgentEffort(id, effort));
         if (!model && effort === undefined) throw new Error('nothing to change — pass model and/or effort');
         return sendJson(res, 200, { ok: true, id, updated });
@@ -560,7 +628,7 @@ const server = http.createServer(async (req, res) => {
     // ---- spread the free catalog across the bench ----
     if (pathname === '/api/agents/distribute' && req.method === 'POST') {
       try {
-        const result = distributeFreeModels();
+        const result = await distributeFreeModels();
         return sendJson(res, 200, { ok: true, ...result });
       } catch (e) {
         return sendJson(res, 400, { error: e.message });
@@ -569,7 +637,10 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/metrics' && req.method === 'GET') return sendJson(res, 200, metricsSummary());
     if (pathname === '/api/runs' && req.method === 'GET') {
-      return sendJson(res, 200, { runs: [...runs.values()].map(({ child, clients, events, ...r }) => ({ ...r, eventCount: events.length })) });
+      const list = [...runs.values()]
+        .map(({ child, clients, events, ...r }) => ({ ...r, eventCount: events.length }))
+        .sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
+      return sendJson(res, 200, { runs: list });
     }
     if (pathname === '/api/run' && req.method === 'POST') {
       const body = await readJson(req);
@@ -593,7 +664,8 @@ const server = http.createServer(async (req, res) => {
       const id = pathname.slice('/api/runs/'.length, -'/stop'.length);
       const run = runs.get(id);
       if (!run) return sendJson(res, 404, { error: 'unknown run' });
-      if (run.child) run.child.kill();
+      if (run.status !== 'running') return sendJson(res, 409, { error: 'run already finished' });
+      stopRun(run);
       return sendJson(res, 200, { ok: true });
     }
     // ---- team preferences (model routing: static vs dynamic) ----
