@@ -24,8 +24,11 @@ const connPill = $('#conn');
 const rail = $('#rail');
 const elapsedEl = $('#elapsed');
 const STAGES = [...rail.querySelectorAll('.station')];
-const ASSIGN_LABEL = 'Assign task';
-function restoreAssignBtn() { sendBtn.disabled = false; sendBtn.textContent = ASSIGN_LABEL; }
+function setAssignState(mode) {
+  if (mode === 'sending') { sendBtn.disabled = true; sendBtn.textContent = 'Assigning…'; }
+  else if (mode === 'live') { sendBtn.disabled = true; sendBtn.textContent = 'Run in progress…'; }
+  else { sendBtn.disabled = false; sendBtn.textContent = 'Assign task'; }
+}
 
 /* ---------- clock ---------- */
 function tickClock() {
@@ -65,10 +68,15 @@ function railReset() {
     elapsedEl.textContent = `elapsed ${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
   }, 1000);
 }
-function railFinish(ok) {
+function railFinish(ok, opts) {
   clearInterval(state.cascadeTimer); clearInterval(state.elapsedTimer);
-  STAGES.forEach(s => { s.classList.remove('lit'); s.classList.add(ok ? 'done' : (s.classList.contains('lit') ? 'lit' : 'done')); });
-  if (!ok) STAGES[STAGES.length - 1].classList.add('failed');
+  const interrupted = !!(opts && opts.interrupted);
+  const wasLit = STAGES.map(s => s.classList.contains('lit'));
+  STAGES.forEach((s, i) => {
+    s.classList.remove('lit');
+    if (ok || wasLit[i]) s.classList.add('done');
+  });
+  if (!ok && !interrupted && STAGES.length) STAGES[STAGES.length - 1].classList.add('failed');
   const total = Math.floor((Date.now() - state.runStartedAt) / 1000);
   elapsedEl.textContent = `${ok ? 'done in' : 'stopped after'} ${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
@@ -294,9 +302,17 @@ function handleEvent(ev) {
   if (ev.kind === 'status') {
     if (ev.status === 'running') return logLine(`run started${ev.dir ? ' in ' + ev.dir : ''}`, 'ln-sys');
     logEl.classList.remove('running');
-    const ok = ev.status === 'done';
-    logLine(ok ? '✓ run finished' : `✗ run ${ev.status} (exit ${ev.exitCode ?? '?'})`, ok ? 'ln-done' : 'ln-err');
-    railFinish(ok); closeStream(); restoreAssignBtn(); state.currentRunId = null; fetchTeam(); fetchReports(); fetchMetrics();
+    if (ev.status === 'done') {
+      logLine('✓ run finished', 'ln-done');
+      railFinish(true);
+    } else if (ev.status === 'stopped') {
+      logLine('■ run stopped', 'ln-err');
+      railFinish(false, { interrupted: true });
+    } else {
+      logLine(`✗ run ${ev.status} (exit ${ev.exitCode ?? '?'})`, 'ln-err');
+      railFinish(false);
+    }
+    closeStream(); setAssignState('idle'); state.currentRunId = null; fetchTeam(); fetchReports(); fetchMetrics();
     if (shiftsOn) fetchJournal();
     return;
   }
@@ -304,11 +320,23 @@ function handleEvent(ev) {
   if (ev.kind === 'raw') return logLine(ev.text, ev.stream === 'stderr' ? 'ln-err' : 'ln-text');
 }
 
+async function fetchLedger() { /* run ledger renders here — filled in with the ledger view */ }
+
+function watchRun(id) {
+  closeStream();
+  state.currentRunId = id;
+  logEl.classList.add('running');
+  stopBtn.disabled = false;
+  state.es = new EventSource('/api/stream?run=' + encodeURIComponent(id));
+  state.es.onmessage = (m) => { try { handleEvent(JSON.parse(m.data)); } catch { logLine(m.data, 'ln-sys'); } };
+  state.es.onerror = () => { logEl.classList.remove('running'); closeStream(); state.currentRunId = null; setAssignState('idle'); fetchLedger(); };
+}
+
 async function dispatchTask(task, dir) {
+  if (state.currentRunId) return logLine('a run is already streaming — stop it first or open the run ledger', 'ln-err');
   clearEmptyState();
   logLine(`assigning to @${state.selectedAgent}: “${task}”`, 'ln-sys');
-  sendBtn.disabled = true;
-  sendBtn.textContent = 'Assigning…';
+  setAssignState('sending');
   railReset();
   try {
     const r = await fetch('/api/run', {
@@ -317,21 +345,13 @@ async function dispatchTask(task, dir) {
       body: JSON.stringify({ task, agent: state.selectedAgent, dir }),
     });
     const data = await r.json();
-    if (!r.ok) { logLine(`not assigned: ${data.error || 'unknown error'} — check the project path and try again`, 'ln-err'); railFinish(false); restoreAssignBtn(); return; }
-    state.currentRunId = data.id;
-    logEl.classList.add('running');
-    stopBtn.disabled = false;
-    closeStream(); // closes old es if any (and keeps button state consistent)
-    stopBtn.disabled = false;
-    state.es = new EventSource('/api/stream?run=' + encodeURIComponent(data.id));
-    state.es.onmessage = (m) => { try { handleEvent(JSON.parse(m.data)); } catch { logLine(m.data, 'ln-sys'); } };
-    state.es.onerror = () => { logEl.classList.remove('running'); closeStream(); state.currentRunId = null; restoreAssignBtn(); };
+    if (!r.ok) { logLine(`not assigned: ${data.error || 'unknown error'} — check the project path and try again`, 'ln-err'); railFinish(false); setAssignState('idle'); return; }
+    watchRun(data.id);
+    setAssignState('live');
   } catch (e) {
     logLine(`not assigned: ${e.message} — check the project path and try again`, 'ln-err');
     railFinish(false);
-    restoreAssignBtn();
-  } finally {
-    setTimeout(restoreAssignBtn, 1500); // allow re-dispatch once the run is off the ground
+    setAssignState('idle');
   }
 }
 
