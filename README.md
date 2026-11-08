@@ -84,7 +84,9 @@ Notes:
 - Concurrency: each task = one `opencode` process; agents inside one run still execute sequentially.
 - Change port with `set PORT=xxxx && node ui\server.js`.
 - It is a local console, not a hosted service — don't expose it to the network.
+- Development check: `node tools/smoke-server.js` (spawns the dashboard on a scratch port and exercises the API).
 
+**Run history.** The dashboard keeps an in-memory run ledger exposed at `/api/runs`; each entry carries a status of `running`, `done`, `stopped`, or `error`. `stopped` means an operator-initiated stop (the **■ stop** button) — it is not a failure and is tracked separately from errors in `/api/metrics`. See the smoke command above for a quick end-to-end check.
 ## Quick start — Antigravity (desktop app)
 
 Antigravity is Google's agent-first IDE/app. The **Agent Manager** is the closest thing to a "team of employees" UI: you spawn agents in parallel, each in its own workspace, and they post artifacts (plans, diffs, screenshots, browser recordings).
