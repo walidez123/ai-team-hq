@@ -37,6 +37,9 @@ const HOST = '127.0.0.1';
 const MAX_EVENTS_PER_RUN = 400;
 const MAX_RUNS_KEPT = 50;
 
+class HttpError extends Error {
+  constructor(status, msg) { super(msg); this.status = status; }
+}
 // Resolve the real opencode binary (works around the .ps1/.cmd shim on Windows)
 const EXE_CANDIDATE = process.platform === 'win32'
   ? path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe')
@@ -154,6 +157,17 @@ function parseAgentFile(file) { return parseAgentFileAt(AGENTS_DIR, file); }
 
 // ---------- per-employee model settings ----------
 const GLOBAL_AGENTS_DIR = path.join(os.homedir(), '.config', 'opencode', 'agents');
+function knownAgentIds() {
+  const ids = new Set(ROSTER.map(s => s.id));
+  for (const dir of [AGENTS_DIR, GLOBAL_AGENTS_DIR]) {
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.endsWith('.md')) ids.add(path.basename(f, '.md'));
+      }
+    } catch { /* dir may not exist */ }
+  }
+  return ids;
+}
 let modelCatalogCache = { at: 0, list: [] };
 
 // machine-wide console vitals, parsed from `opencode stats` (best effort)
@@ -463,10 +477,16 @@ function sendJson(res, code, obj) {
 function readBody(req, limit = 1024 * 1024) {
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
-    req.on('data', (c) => { size += c.length; if (size > limit) { reject(new Error('body too large')); req.destroy(); } else chunks.push(c); });
+    req.on('data', (c) => { size += c.length; if (size > limit) { reject(new HttpError(413, 'body too large')); req.destroy(); } else chunks.push(c); });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
     req.on('error', reject);
   });
+}
+async function readJson(req) {
+  const raw = await readBody(req);
+  if (!raw || !raw.trim()) return {};
+  try { return JSON.parse(raw); }
+  catch (e) { if (e instanceof HttpError) throw e; throw new HttpError(400, 'invalid JSON body'); }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -515,7 +535,7 @@ const server = http.createServer(async (req, res) => {
     // ---- crew settings (per-employee model assignment) ----
     if (pathname === '/api/agents/settings' && req.method === 'GET') return sendJson(res, 200, agentSettingsPayload());
     if (pathname === '/api/agents/settings' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req) || '{}');
+      const body = await readJson(req);
       try {
         const id = String(body.id || '');
         const model = String(body.model || '');
@@ -545,10 +565,15 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { runs: [...runs.values()].map(({ child, clients, events, ...r }) => ({ ...r, eventCount: events.length })) });
     }
     if (pathname === '/api/run' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req) || '{}');
+      const body = await readJson(req);
       const task = (body.task || '').trim();
       if (!task) return sendJson(res, 400, { error: 'task is required' });
-      const agent = /^[a-z][a-z-]*$/.test(body.agent || '') ? body.agent : 'dispatcher';
+      const requestedAgent = String(body.agent || '').trim();
+      let agent = 'dispatcher';
+      if (requestedAgent) {
+        if (!knownAgentIds().has(requestedAgent)) return sendJson(res, 400, { error: `unknown agent: ${requestedAgent}` });
+        agent = requestedAgent;
+      }
       try {
         const run = startRun({ task, agent, dir: body.dir });
         pushEvent(run, { kind: 'status', status: 'running', agent, dir: run.dir });
@@ -567,7 +592,7 @@ const server = http.createServer(async (req, res) => {
     // ---- team preferences (model routing: static vs dynamic) ----
     if (pathname === '/api/preferences' && req.method === 'GET') return sendJson(res, 200, prefsPayload());
     if (pathname === '/api/preferences' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req) || '{}');
+      const body = await readJson(req);
       const value = String(body.modelRouting || '').toLowerCase();
       if (!['static', 'dynamic'].includes(value)) return sendJson(res, 400, { error: "modelRouting must be 'static' or 'dynamic'" });
       writePrefs({ ...readPrefs(), modelRouting: value });
@@ -582,7 +607,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { projects });
     }
     if (pathname === '/api/projects' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req) || '{}');
+      const body = await readJson(req);
       const target = path.resolve(String(body.path || ''));
       if (!isDir(target)) return sendJson(res, 400, { error: `Not a directory: ${target}` });
       const now = new Date().toISOString();
@@ -591,7 +616,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, path: target });
     }
     if (pathname === '/api/projects/new' && req.method === 'POST') {
-      const body = JSON.parse(await readBody(req) || '{}');
+      const body = await readJson(req);
       try {
         const result = scaffoldProject({ name: String(body.name || '').trim(), targetPath: String(body.path || '').trim() });
         return sendJson(res, 200, result);
@@ -600,7 +625,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (pathname === '/api/projects' && req.method === 'DELETE') {
-      const body = JSON.parse(await readBody(req) || '{}');
+      const body = await readJson(req);
       const key = normalizePathKey(String(body.path || ''));
       const rest = readRegistry().filter(p => normalizePathKey(p && p.path) !== key);
       writeRegistry(rest);
@@ -634,7 +659,7 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(404); res.end('not found');
   } catch (err) {
-    sendJson(res, 500, { error: String(err && err.message || err) });
+    sendJson(res, (err && err.status) || 500, { error: String(err && err.message || err) });
   }
 });
 
