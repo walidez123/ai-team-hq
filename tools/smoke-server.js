@@ -1,7 +1,7 @@
 'use strict';
-const http = require('http');
 const { spawn, execFile } = require('child_process');
 const path = require('path');
+const { createLineSplitter, updateAgyConfigComment, updateOpencodeFrontmatter } = require('../ui/server.js');
 
 const ROOT = path.resolve(__dirname, '..');
 const PORT = 4399;
@@ -53,6 +53,53 @@ function killServer(child) {
 }
 
 async function main() {
+  // Unit Test 1: Line-buffered stream splitter handles mid-JSON and multi-byte UTF-8 splits
+  try {
+    const received = [];
+    const splitter = createLineSplitter(l => received.push(l));
+    const sample1 = JSON.stringify({ event: 'thought', message: 'Analyzing 🚀 architecture' });
+    const sample2 = JSON.stringify({ event: 'tool_use', tool: 'read_file', input: { path: 'ui/server.js' } });
+    const payload = Buffer.from(`${sample1}\n${sample2}\n`, 'utf8');
+    // Slice mid-JSON and mid-emoji
+    splitter.write(payload.subarray(0, 17));
+    splitter.write(payload.subarray(17, 43));
+    splitter.write(payload.subarray(43));
+    splitter.end();
+    if (received.length === 2 && JSON.parse(received[0]).message.includes('🚀') && JSON.parse(received[1]).tool === 'read_file') {
+      ok('unit: createLineSplitter chunk & UTF-8 safety');
+    } else {
+      fail('unit: createLineSplitter chunk & UTF-8 safety', `received=${JSON.stringify(received)}`);
+    }
+  } catch (e) {
+    fail('unit: createLineSplitter chunk & UTF-8 safety', String(e));
+  }
+
+  // Unit Test 2: Frontmatter & config comment writers never corrupt body lines containing "model:"
+  try {
+    const sampleMd = [
+      '---',
+      'description: Test agent',
+      'mode: subagent',
+      'model: old-model',
+      '---',
+      '',
+      'Here is a body line that says:',
+      'model: do-not-touch-this-line',
+      'reasoningEffort: keep-body-intact',
+    ].join('\n');
+    const updatedOc = updateOpencodeFrontmatter(sampleMd, 'model', 'new-model');
+    const updatedAgy = updateAgyConfigComment(sampleMd, { model: 'gemini-4-argon-high', effort: 'high' });
+    const bodyIntactOc = updatedOc.includes('model: new-model') && updatedOc.includes('model: do-not-touch-this-line');
+    const bodyIntactAgy = updatedAgy.includes('model=gemini-4-argon-high') && updatedAgy.includes('model: do-not-touch-this-line');
+    if (bodyIntactOc && bodyIntactAgy) {
+      ok('unit: frontmatter & agy config comment body safety');
+    } else {
+      fail('unit: frontmatter & agy config comment body safety', `oc=${bodyIntactOc} agy=${bodyIntactAgy}`);
+    }
+  } catch (e) {
+    fail('unit: frontmatter & agy config comment body safety', String(e));
+  }
+
   const child = spawn('node', ['ui/server.js'], {
     cwd: ROOT,
     env: { ...process.env, PORT: String(PORT) },
@@ -77,8 +124,8 @@ async function main() {
     try {
       const res = await fetch(BASE + '/');
       const text = await res.text();
-      if (res.status === 200 && text.includes('dispatch room')) ok('GET /');
-      else fail('GET /', `status=${res.status} contains=${text.includes('dispatch room')}`);
+      if (res.status === 200 && text.includes('dispatch room') && text.includes('gitPill')) ok('GET /');
+      else fail('GET /', `status=${res.status}`);
     } catch (e) { fail('GET /', String(e)); }
 
     // b. GET /api/team
@@ -86,17 +133,31 @@ async function main() {
       const { res, body } = await fetchJson(BASE + '/api/team');
       const roster = body && body.roster;
       const good = res.status === 200 && Array.isArray(roster) && roster.length === 8 &&
-        roster.every(x => x && typeof x.id === 'string' && typeof x.mode === 'string');
+        roster.every(x => x && typeof x.id === 'string' && typeof x.mode === 'string') &&
+        (body.engine === 'agy' || body.engine === 'opencode');
       if (good) ok('GET /api/team');
       else fail('GET /api/team', `status=${res.status} roster=${Array.isArray(roster) ? roster.length : 'n/a'}`);
     } catch (e) { fail('GET /api/team', String(e)); }
 
-    // c. GET /api/metrics
+    // c. GET /api/metrics & project-scoped ?dir=
     try {
-      const { res, body } = await fetchJson(BASE + '/api/metrics');
-      if (res.status === 200 && typeof (body && body.total) === 'number') ok('GET /api/metrics');
-      else fail('GET /api/metrics', `status=${res.status} total=${body && body.total}`);
-    } catch (e) { fail('GET /api/metrics', String(e)); }
+      const { res, body } = await fetchJson(BASE + '/api/metrics?dir=' + encodeURIComponent(ROOT));
+      if (res.status === 200 && typeof (body && body.total) === 'number' && typeof body.globalTotal === 'number' && body.scopedDir) {
+        ok('GET /api/metrics (project-scoped)');
+      } else {
+        fail('GET /api/metrics (project-scoped)', `status=${res.status} body=${JSON.stringify(body)}`);
+      }
+    } catch (e) { fail('GET /api/metrics (project-scoped)', String(e)); }
+
+    // c2. GET /api/git-status
+    try {
+      const { res, body } = await fetchJson(BASE + '/api/git-status?dir=' + encodeURIComponent(ROOT));
+      if (res.status === 200 && body && body.isRepo === true && typeof body.branch === 'string') {
+        ok('GET /api/git-status');
+      } else {
+        fail('GET /api/git-status', `status=${res.status} body=${JSON.stringify(body)}`);
+      }
+    } catch (e) { fail('GET /api/git-status', String(e)); }
 
     // d. GET /api/reports
     try {
@@ -134,8 +195,7 @@ async function main() {
       else fail('POST stop unknown run', `status=${res.status}`);
     } catch (e) { fail('POST stop unknown run', String(e)); }
 
-    // j. (run before i? order: i then j per plan; do j here after h, before i? Plan order i then j then k then l. We'll follow i, j, k, l.)
-    // i. real run
+    // i. real run + stop
     let runId = null;
     let runSkipped = false;
     try {
@@ -145,47 +205,40 @@ async function main() {
       }
       runId = body.id;
 
-      // wait for /api/runs to show it
       let appeared = false;
       const appearStart = Date.now();
-      while (Date.now() - appearStart < 90000) {
+      while (Date.now() - appearStart < 30000) {
         const { body: b2 } = await fetchJson(BASE + '/api/runs');
         const r = (b2 && b2.runs || []).find(x => x.id === runId);
         if (r) { appeared = true; break; }
-        await sleep(1000);
+        await sleep(500);
       }
-      if (!appeared) throw new Error('run did not appear in /api/runs within 90s');
+      if (!appeared) throw new Error('run did not appear in /api/runs within 30s');
 
-      // check spawn failure: if run already errored with spawn-ish error, skip
       let { body: b3 } = await fetchJson(BASE + '/api/runs');
       let runObj = (b3 && b3.runs || []).find(x => x.id === runId);
       if (runObj && runObj.status === 'error' && /spawn|ENOENT|not found/i.test(String(runObj.error || ''))) {
         runSkipped = true;
-        warn('opencode could not be spawned; skipping real-run step');
+        warn('CLI binary could not be spawned; skipping real-run step');
       } else {
-        // if still running, post stop
         if (runObj && runObj.status === 'running') {
           const stopRes = await fetch(BASE + '/api/runs/' + encodeURIComponent(runId) + '/stop', { method: 'POST' });
-          // 200 expected; 409 acceptable if race
           if (stopRes.status !== 200 && stopRes.status !== 409) {
             warn(`stop returned ${stopRes.status}`);
           }
         }
-        // wait until terminal
         const termStart = Date.now();
-        while (Date.now() - termStart < 90000) {
+        while (Date.now() - termStart < 30000) {
           const { body: b4 } = await fetchJson(BASE + '/api/runs');
           const r = (b4 && b4.runs || []).find(x => x.id === runId);
           if (r && r.status && r.status !== 'running') { runObj = r; break; }
-          await sleep(1000);
+          await sleep(500);
         }
         const finalStatus = runObj ? runObj.status : null;
-        // detect spawn failure after terminal
         if (finalStatus === 'error' && /spawn|ENOENT|not found/i.test(String(runObj.error || ''))) {
           runSkipped = true;
-          warn('opencode could not be spawned; skipping real-run step');
+          warn('CLI binary could not be spawned; skipping real-run step');
         } else if (finalStatus === 'stopped' || finalStatus === 'done') {
-          // ensure listed
           const { body: b5 } = await fetchJson(BASE + '/api/runs');
           const listed = (b5 && b5.runs || []).some(x => x.id === runId);
           if (listed) ok('POST /api/run real run + stop');
@@ -195,17 +248,14 @@ async function main() {
         }
       }
     } catch (e) {
-      // If launch itself failed due to spawn, skip
       if (/spawn|ENOENT|not found/i.test(String(e))) {
         runSkipped = true;
-        warn('opencode could not be spawned; skipping real-run step: ' + String(e));
+        warn('CLI binary could not be spawned; skipping real-run step: ' + String(e));
       } else {
         fail('POST /api/run real run + stop', String(e));
       }
     }
     if (runSkipped) {
-      // mark as warning, not failure: print an ok? Requirement: skip-with-warning, not fail. We'll not increment fail; print warn already.
-      // To keep test count meaningful, record a pass as skipped? We'll just warn.
       console.log('SKIP real-run step (warning above)');
     }
 
@@ -229,31 +279,46 @@ async function main() {
         measure(BASE + '/api/team'),
       ]);
       const body = sRes.body;
-      const good = sRes.r.status === 200 && Array.isArray(body && body.agents) && body.agents.length === 8 && Array.isArray(body && body.catalog);
+      const good = sRes.r.status === 200 && Array.isArray(body && body.agents) && body.agents.length === 8 && Array.isArray(body && body.catalog) && body.catalog.length > 0;
       if (good) ok('GET /api/agents/settings');
       else fail('GET /api/agents/settings', `status=${sRes.r.status} agents=${body && body.agents && body.agents.length}`);
       if (tRes.dur >= 300) warn(`concurrent /api/team took ${tRes.dur}ms (>=300ms) while settings in flight`);
     } catch (e) { fail('GET /api/agents/settings', String(e)); }
 
-    // l. preferences
+    // l. preferences (routing, engine, timeout)
     let originalPrefs = null;
     try {
       const { body: orig } = await fetchJson(BASE + '/api/preferences');
       originalPrefs = orig;
-      // dynamic
-      const r1 = await fetch(BASE + '/api/preferences', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ modelRouting: 'dynamic' }) });
-      if (r1.status !== 200) throw new Error(`dynamic status=${r1.status}`);
-      // bogus
-      const r2 = await fetch(BASE + '/api/preferences', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ modelRouting: 'bogus' }) });
-      if (r2.status !== 400) throw new Error(`bogus status=${r2.status}`);
-      ok('POST /api/preferences');
+      const r1 = await fetch(BASE + '/api/preferences', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ modelRouting: 'dynamic', engine: 'agy', inactivityTimeoutMin: 15 }),
+      });
+      if (r1.status !== 200) throw new Error(`valid prefs status=${r1.status}`);
+      const r2 = await fetch(BASE + '/api/preferences', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ modelRouting: 'bogus' }),
+      });
+      if (r2.status !== 400) throw new Error(`bogus routing status=${r2.status}`);
+      const r3 = await fetch(BASE + '/api/preferences', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ engine: 'invalid-engine' }),
+      });
+      if (r3.status !== 400) throw new Error(`bogus engine status=${r3.status}`);
+      ok('POST /api/preferences (engine, routing, watchdog)');
     } catch (e) {
-      fail('POST /api/preferences', String(e));
+      fail('POST /api/preferences (engine, routing, watchdog)', String(e));
     } finally {
-      // restore original
       try {
-        if (originalPrefs && originalPrefs.modelRouting) {
-          await fetch(BASE + '/api/preferences', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ modelRouting: originalPrefs.modelRouting }) });
+        if (originalPrefs) {
+          await fetch(BASE + '/api/preferences', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(originalPrefs),
+          });
         }
       } catch { /* best effort */ }
     }

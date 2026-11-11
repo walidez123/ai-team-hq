@@ -2,20 +2,30 @@
  * AI Team HQ — zero-dependency local dashboard for the AI Team.
  * Serves on http://127.0.0.1:4357  (override with PORT env var)
  *
- * Endpoints:
- *   GET  /                  → the dashboard
- *   GET  /api/team          → roster parsed from .opencode/agents/*.md (+ live status)
- *   GET  /api/reports       → list reports/*.md
- *   GET  /api/reports/<f>   → raw markdown of one report
- *   POST /api/run           → { task, agent?, dir? } → launches `opencode run`
- *   GET  /api/stream?run=id → SSE: live events of a run (replays buffered events)
- *   GET  /api/runs          → in-memory history of this session's runs
- *   POST /api/runs/<id>/stop→ kill a running job
+ * Primary Engine: Google Antigravity CLI (`agy`)
+ * Fallback Engine: OpenCode CLI (`opencode`)
  *
- * Privacy/safety notes:
- *   - Binds to 127.0.0.1 only. Anyone with your machine can use it.
- *   - Runs use `opencode run --auto` so agents don't stall waiting for approvals.
- *   - Free opencode models may train on inputs — don't send secrets.
+ * Endpoints:
+ *   GET  /                     → the dashboard
+ *   GET  /api/team             → roster parsed from .agents/agents/*.md (+ live status)
+ *   GET  /api/reports          → list reports/*.md (supports ?dir=)
+ *   GET  /api/reports/<f>      → raw markdown of one report (supports ?dir=)
+ *   GET  /api/journal          → per-employee shift log entries (supports ?dir=)
+ *   GET  /api/metrics          → run metrics summary (supports ?dir= for project scope)
+ *   GET  /api/git-status       → current branch, dirty files, recent commits (supports ?dir=)
+ *   GET  /api/agents/settings  → model catalog + per-employee model & effort
+ *   POST /api/agents/settings  → update employee model and/or effort
+ *   POST /api/agents/distribute→ spread optimal models across the 8 employees
+ *   GET  /api/preferences      → engine, modelRouting, inactivityTimeoutMin
+ *   POST /api/preferences      → update preferences
+ *   GET  /api/projects         → list registered project folders
+ *   POST /api/projects         → register an existing folder
+ *   POST /api/projects/new     → scaffold or adopt a project folder
+ *   DELETE /api/projects       → unregister a project folder
+ *   POST /api/run              → { task, agent?, dir? } → launches CLI run
+ *   GET  /api/stream?run=id    → SSE: live events of a run (replays buffered events)
+ *   GET  /api/runs             → in-memory history of this session's runs
+ *   POST /api/runs/<id>/stop   → kill a running job
  */
 'use strict';
 
@@ -23,55 +33,214 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { execFile, execFileSync } = require('child_process');
+const { spawn, execFile, execFileSync } = require('child_process');
+const { StringDecoder } = require('string_decoder');
 
 const ROOT = path.resolve(__dirname, '..');           // the "AI team" folder
 const PUBLIC = path.join(__dirname, 'public');
 const REPORTS = path.join(ROOT, 'reports');
-const AGENTS_DIR = path.join(ROOT, '.opencode', 'agents');
+
+// Antigravity agent directories (workspace + global plugin)
+const AGY_AGENTS_DIR = path.join(ROOT, '.agents', 'agents');
+const GLOBAL_AGY_PLUGIN_AGENTS_DIR = path.join(os.homedir(), '.gemini', 'config', 'plugins', 'ai-team', 'agents');
+
+// Legacy OpenCode agent directories (kept in sync for dual-engine compatibility)
+const OPENCODE_AGENTS_DIR = path.join(ROOT, '.opencode', 'agents');
+const GLOBAL_OPENCODE_AGENTS_DIR = path.join(os.homedir(), '.config', 'opencode', 'agents');
+
 const PROJECTS_FILE = path.join(ROOT, 'projects.json');
 const TEMPLATE_DIR = path.join(ROOT, 'templates', 'project');
 const METRICS_FILE = path.join(ROOT, 'reports', '.metrics.jsonl');
 const PORT = Number(process.env.PORT || 4357);
 const HOST = '127.0.0.1';
-const MAX_EVENTS_PER_RUN = 400;
+const MAX_EVENTS_PER_RUN = 600;
 const MAX_RUNS_KEPT = 50;
 
 class HttpError extends Error {
   constructor(status, msg) { super(msg); this.status = status; }
 }
-// Resolve the real opencode binary (works around the .ps1/.cmd shim on Windows)
-const EXE_CANDIDATE = process.platform === 'win32'
+
+// Resolve Antigravity CLI (`agy`) binary
+const AGY_CANDIDATE = process.platform === 'win32'
+  ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'agy', 'bin', 'agy.exe')
+  : 'agy';
+const AGY_BIN = fs.existsSync(AGY_CANDIDATE) ? AGY_CANDIDATE : 'agy';
+
+// Resolve OpenCode CLI (`opencode`) binary
+const OPENCODE_CANDIDATE = process.platform === 'win32'
   ? path.join(process.env.APPDATA || '', 'npm', 'node_modules', '@opencode', 'cli', 'bin', 'opencode.exe')
   : 'opencode';
-const OPENCODE = fs.existsSync(EXE_CANDIDATE) ? EXE_CANDIDATE : 'opencode';
+const OPENCODE_BIN = fs.existsSync(OPENCODE_CANDIDATE) ? OPENCODE_CANDIDATE : 'opencode';
 
 const ROSTER = [
-  { id: 'dispatcher', code: 'PM', no: '001', color: '#E8590C', blurb: 'Routes a raw task through the pipeline: plan, build, test, review, file the report.' },
-  { id: 'architect',  code: 'AR', no: '002', color: '#33608C', blurb: 'Turns a task into a plan: files to touch, risks, test strategy.' },
-  { id: 'backend',    code: 'BE', no: '003', color: '#276A4B', blurb: 'APIs, data layer and business logic.' },
-  { id: 'frontend',   code: 'FE', no: '004', color: '#6C4A8C', blurb: 'UI, styling, client behavior, accessibility.' },
-  { id: 'qa',         code: 'QA', no: '005', color: '#0F6B78', blurb: 'Runs the suite, writes tests, hunts bugs.' },
-  { id: 'reviewer',   code: 'RV', no: '006', color: '#B3402A', blurb: 'Read-only review of the diff: bugs, security, performance.' },
-  { id: 'reporter',   code: 'RP', no: '007', color: '#4A4E42', blurb: 'Files the final report into reports/.' },
-  { id: 'explainer',  code: 'EX', no: '008', color: '#8A6D2F', blurb: 'Reads the project end to end and files docs/PROJECT-GUIDE.md.' },
+  { id: 'dispatcher', code: 'PM', no: '001', color: '#E8590C', stage: 'intake', blurb: 'Routes a raw task through the pipeline: plan, build, test, review, file the report.' },
+  { id: 'architect',  code: 'AR', no: '002', color: '#33608C', stage: 'plan',   blurb: 'Turns a task into a plan: files to touch, risks, test strategy.' },
+  { id: 'backend',    code: 'BE', no: '003', color: '#276A4B', stage: 'build',  blurb: 'APIs, data layer and business logic.' },
+  { id: 'frontend',   code: 'FE', no: '004', color: '#6C4A8C', stage: 'build',  blurb: 'UI, styling, client behavior, accessibility.' },
+  { id: 'qa',         code: 'QA', no: '005', color: '#0F6B78', stage: 'test',   blurb: 'Runs the suite, writes tests, hunts bugs.' },
+  { id: 'reviewer',   code: 'RV', no: '006', color: '#B3402A', stage: 'review', blurb: 'Read-only review of the diff: bugs, security, performance.' },
+  { id: 'reporter',   code: 'RP', no: '007', color: '#4A4E42', stage: 'report', blurb: 'Files the final report into reports/.' },
+  { id: 'explainer',  code: 'EX', no: '008', color: '#8A6D2F', stage: 'report', blurb: 'Reads the project end to end and files docs/PROJECT-GUIDE.md.' },
 ];
+
+const AGENT_TO_STAGE = {
+  dispatcher: 'intake',
+  architect: 'plan',
+  'architect-deep': 'plan',
+  backend: 'build',
+  'backend-deep': 'build',
+  frontend: 'build',
+  'frontend-deep': 'build',
+  qa: 'test',
+  'qa-deep': 'test',
+  reviewer: 'review',
+  'reviewer-deep': 'review',
+  reporter: 'report',
+  explainer: 'report',
+};
+
+const DEFAULT_AGY_MODELS = [
+  'gemini-3.8-flash-high',
+  'gemini-3.8-flash-medium',
+  'gemini-3.8-flash-low',
+  'gemini-4-argon-high',
+  'gemini-4-argon-medium',
+  'gemini-4-argon-low',
+  'claude-sonnet-5-5-high',
+  'claude-sonnet-5-5-medium',
+  'claude-sonnet-5-5-low',
+  'claude-opus-5-5-high',
+  'claude-opus-5-5-medium',
+  'claude-opus-5-5-low',
+  'gpt-oss-120b-medium',
+];
+
+// ---------- team preferences ----------
+const AGY_PREFS_FILE = path.join(os.homedir(), '.gemini', 'config', 'ai-team-preferences.json');
+const LEGACY_PREFS_FILE = path.join(os.homedir(), '.config', 'opencode', 'team-preferences.json');
+
+function readPrefs() {
+  for (const file of [AGY_PREFS_FILE, LEGACY_PREFS_FILE]) {
+    try {
+      if (fs.existsSync(file)) {
+        const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (j && typeof j === 'object') return j;
+      }
+    } catch { /* ignore */ }
+  }
+  return {};
+}
+
+function writePrefs(prefs) {
+  for (const file of [AGY_PREFS_FILE, LEGACY_PREFS_FILE]) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(prefs, null, 2));
+    } catch { /* best effort */ }
+  }
+}
+
+function prefsPayload() {
+  const p = readPrefs();
+  const engine = p.engine === 'opencode' ? 'opencode' : 'agy';
+  const modelRouting = p.modelRouting === 'dynamic' ? 'dynamic' : 'static';
+  const timeout = Number(p.inactivityTimeoutMin);
+  const inactivityTimeoutMin = Number.isFinite(timeout) && timeout >= 1 && timeout <= 120 ? timeout : 10;
+  return { engine, modelRouting, inactivityTimeoutMin };
+}
+
+function activeEngine() {
+  return prefsPayload().engine;
+}
+
+// ---------- safe line-buffered stream splitter ----------
+function createLineSplitter(onLine) {
+  const decoder = new StringDecoder('utf8');
+  let remainder = '';
+  return {
+    write(chunk) {
+      remainder += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+      const lines = remainder.split(/\r?\n/);
+      remainder = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed) onLine(trimmed);
+      }
+    },
+    end() {
+      remainder += decoder.end();
+      const trimmed = remainder.trim();
+      remainder = '';
+      if (trimmed) onLine(trimmed);
+    },
+  };
+}
 
 // ---------- in-memory run state ----------
 const runs = new Map(); // id → run object
 let runCounter = 0;
 
 function pushEvent(run, event) {
-  run.events.push(event);
+  const enriched = { ts: new Date().toISOString(), ...event };
+  run.events.push(enriched);
   if (run.events.length > MAX_EVENTS_PER_RUN) run.events.shift();
-  const msg = `data: ${JSON.stringify(event)}\n\n`;
+  const msg = `data: ${JSON.stringify(enriched)}\n\n`;
   for (const res of run.clients) {
     try { res.write(msg); } catch { /* client gone */ }
   }
 }
 
+function setRunStage(run, stage, status = 'lit', agent = null) {
+  if (!stage) return;
+  const order = ['intake', 'plan', 'build', 'test', 'review', 'report'];
+  const idx = order.indexOf(stage);
+  if (idx >= 0 && status === 'lit') {
+    for (let i = 0; i < idx; i++) {
+      const prev = order[i];
+      if (run.stages[prev] === 'lit') {
+        run.stages[prev] = 'done';
+      }
+    }
+  }
+  if (run.stages[stage] === status) return;
+  run.stages[stage] = status;
+  pushEvent(run, { kind: 'stage', stage, status, agent: agent || run.agent, stages: { ...run.stages } });
+}
+
+function detectStageTransitionFromEvent(run, parsed, rawText) {
+  const str = rawText || JSON.stringify(parsed || {});
+  // Detect subagent invocation or @mention handoff
+  const subMatch = str.match(/(?:TypeName|subagent|agent)["'\s:=]+["']?(architect(?:-deep)?|backend(?:-deep)?|frontend(?:-deep)?|qa(?:-deep)?|reviewer(?:-deep)?|reporter|explainer)["']?/i)
+    || str.match(/@(architect(?:-deep)?|backend(?:-deep)?|frontend(?:-deep)?|qa(?:-deep)?|reviewer(?:-deep)?|reporter|explainer)\b/i);
+  if (subMatch) {
+    const targetAgent = subMatch[1].toLowerCase().replace(/-deep$/, '');
+    const st = AGENT_TO_STAGE[targetAgent];
+    if (st) setRunStage(run, st, 'lit', targetAgent);
+  }
+  // Detect writes to reports/ or journal/
+  if (/reports[\\/]\d{4}-\d{2}-\d{2}/i.test(str)) {
+    setRunStage(run, 'report', 'lit', 'reporter');
+  }
+}
+
 function sseSend(res, event) {
   res.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+function snapshotJournalCounts(cwd) {
+  const counts = {};
+  const journalDir = path.join(cwd, 'journal');
+  if (!fs.existsSync(journalDir)) return counts;
+  for (const slot of ROSTER) {
+    try {
+      const p = path.join(journalDir, slot.id + '.jsonl');
+      if (fs.existsSync(p)) {
+        const lines = fs.readFileSync(p, 'utf8').split('\n').filter(Boolean);
+        counts[slot.id] = lines.length;
+      }
+    } catch { /* ignore */ }
+  }
+  return counts;
 }
 
 function startRun({ task, agent, dir }) {
@@ -80,62 +249,199 @@ function startRun({ task, agent, dir }) {
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
     throw new Error(`Working directory does not exist: ${cwd}`);
   }
+
+  const prefs = prefsPayload();
+  const engine = prefs.engine;
+  const baseAgentId = String(agent || 'dispatcher').replace(/-deep$/, '');
+  const meta = getEffectiveAgentMeta(agent || 'dispatcher');
+
+  const initialStages = { intake: 'lit', plan: 'idle', build: 'idle', test: 'idle', review: 'idle', report: 'idle' };
+  if (baseAgentId !== 'dispatcher' && AGENT_TO_STAGE[baseAgentId]) {
+    initialStages.intake = 'done';
+    initialStages[AGENT_TO_STAGE[baseAgentId]] = 'lit';
+  }
+
   const run = {
-    id, task, agent: agent || 'dispatcher', dir: cwd,
+    id, task, agent: agent || 'dispatcher', dir: cwd, engine,
+    model: meta.model || null,
     startedAt: new Date().toISOString(), endedAt: null,
     status: 'running', exitCode: null, error: null,
-    stopRequested: false,
+    stopRequested: false, timedOut: false,
+    stages: initialStages,
     events: [], clients: new Set(), child: null,
+    watchdog: null, journalTimer: null,
   };
-  const args = ['run', '--standalone', '--format', 'json', '--auto', '--agent', run.agent, '--title', `hq:${id}`, task];
-  const child = execFile(OPENCODE, args, { cwd, windowsHide: true, maxBuffer: 64 * 1024 * 1024, stdio: ['pipe', 'pipe', 'pipe'] }, (err) => {
+
+  let bin;
+  let args;
+  if (engine === 'agy') {
+    bin = AGY_BIN;
+    args = [
+      '--print',
+      '--output-format', 'stream-json',
+      '--dangerously-skip-permissions',
+      '--mode', 'auto',
+      '--agent', run.agent,
+    ];
+    if (meta.model && !meta.model.startsWith('opencode/')) {
+      args.push('--model', meta.model);
+    }
+    if (meta.effort && ['low', 'medium', 'high', 'xhigh', 'max'].includes(meta.effort)) {
+      args.push('--effort', meta.effort);
+    }
+    args.push(task);
+  } else {
+    bin = OPENCODE_BIN;
+    args = ['run', '--standalone', '--format', 'json', '--auto', '--agent', run.agent, '--title', `hq:${id}`, task];
+  }
+
+  const child = spawn(bin, args, {
+    cwd,
+    windowsHide: true,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  run.child = child;
+  if (child.stdin) child.stdin.end();
+
+  // Inactivity watchdog
+  const timeoutMs = (prefs.inactivityTimeoutMin || 10) * 60 * 1000;
+  const resetWatchdog = () => {
+    if (run.watchdog) clearTimeout(run.watchdog);
+    if (run.status !== 'running') return;
+    run.watchdog = setTimeout(() => {
+      if (run.status === 'running') {
+        run.timedOut = true;
+        pushEvent(run, {
+          kind: 'raw',
+          stream: 'stderr',
+          text: `⏱ Run timed out after ${prefs.inactivityTimeoutMin}m of inactivity — halting process.`,
+        });
+        stopRun(run);
+      }
+    }, timeoutMs);
+  };
+  resetWatchdog();
+
+  // Poll journal directory every 2s during active run to detect real stage completions
+  const knownJournals = snapshotJournalCounts(cwd);
+  run.journalTimer = setInterval(() => {
+    const journalDir = path.join(cwd, 'journal');
+    if (!fs.existsSync(journalDir)) return;
+    for (const slot of ROSTER) {
+      try {
+        const p = path.join(journalDir, slot.id + '.jsonl');
+        if (!fs.existsSync(p)) continue;
+        const lines = fs.readFileSync(p, 'utf8').split('\n').filter(Boolean);
+        const prevCount = knownJournals[slot.id] || 0;
+        if (lines.length > prevCount) {
+          knownJournals[slot.id] = lines.length;
+          const latestRaw = lines[lines.length - 1];
+          let parsedEntry = null;
+          try { parsedEntry = JSON.parse(latestRaw); } catch { /* ignore */ }
+          const st = AGENT_TO_STAGE[slot.id];
+          if (st) {
+            setRunStage(run, st, parsedEntry && parsedEntry.status === 'failed' ? 'failed' : 'done', slot.id);
+          }
+          if (parsedEntry) {
+            pushEvent(run, { kind: 'journal', agent: slot.id, entry: parsedEntry });
+          }
+        }
+      } catch { /* ignore */ }
+    }
+  }, 2000);
+
+  const handleParsedLine = (trimmed, stream) => {
+    resetWatchdog();
+    let ev;
+    try {
+      const parsed = JSON.parse(trimmed);
+      ev = { kind: 'json', stream, event: parsed };
+      detectStageTransitionFromEvent(run, parsed, trimmed);
+    } catch {
+      ev = { kind: 'raw', stream, text: trimmed };
+      detectStageTransitionFromEvent(run, null, trimmed);
+    }
+    pushEvent(run, ev);
+  };
+
+  const stdoutSplitter = createLineSplitter(line => handleParsedLine(line, 'stdout'));
+  const stderrSplitter = createLineSplitter(line => handleParsedLine(line, 'stderr'));
+
+  child.stdout.on('data', d => stdoutSplitter.write(d));
+  child.stderr.on('data', d => stderrSplitter.write(d));
+
+  let finalized = false;
+  const finalize = (code, signal, spawnErr) => {
+    if (finalized) return;
+    finalized = true;
+    stdoutSplitter.end();
+    stderrSplitter.end();
+    if (run.watchdog) { clearTimeout(run.watchdog); run.watchdog = null; }
+    if (run.journalTimer) { clearInterval(run.journalTimer); run.journalTimer = null; }
+
     run.endedAt = new Date().toISOString();
-    run.exitCode = err ? (typeof err.code === 'number' ? err.code : null) : 0;
-    run.status = (run.stopRequested || (err && (err.killed || err.signal))) ? 'stopped' : (err ? 'error' : 'done');
-    run.error = run.status === 'error' ? String((err && err.message) || '') : null;
-    pushEvent(run, { kind: 'status', status: run.status, exitCode: run.exitCode, endedAt: run.endedAt });
+    run.exitCode = typeof code === 'number' ? code : null;
+    if (run.stopRequested && !run.timedOut) {
+      run.status = 'stopped';
+    } else if (run.timedOut) {
+      run.status = 'error';
+      run.error = `Timed out after ${prefs.inactivityTimeoutMin}m of inactivity`;
+    } else if (spawnErr) {
+      run.status = 'error';
+      run.error = String(spawnErr.message || spawnErr);
+    } else if (code === 0) {
+      run.status = 'done';
+    } else if (signal) {
+      run.status = 'stopped';
+    } else {
+      run.status = 'error';
+      run.error = `Process exited with code ${code}`;
+    }
+
+    // Update final stages state
+    for (const k of Object.keys(run.stages)) {
+      if (run.stages[k] === 'lit') {
+        run.stages[k] = run.status === 'done' ? 'done' : (run.status === 'stopped' ? 'done' : 'failed');
+      }
+    }
+    if (run.status === 'done' && baseAgentId === 'dispatcher') {
+      for (const k of Object.keys(run.stages)) run.stages[k] = 'done';
+    }
+
+    pushEvent(run, {
+      kind: 'status',
+      status: run.status,
+      exitCode: run.exitCode,
+      error: run.error,
+      endedAt: run.endedAt,
+      stages: { ...run.stages },
+    });
+
     appendMetric({
-      id: run.id, agent: run.agent, dir: run.dir,
+      id: run.id, agent: run.agent, dir: run.dir, engine: run.engine,
       task: String(run.task || '').slice(0, 500),
       startedAt: run.startedAt, endedAt: run.endedAt,
       durationMs: Math.max(0, new Date(run.endedAt) - new Date(run.startedAt)),
       status: run.status, exitCode: run.exitCode,
-      signal: run.status === 'stopped' ? ((err && err.signal) || null) : undefined,
+      signal: run.status === 'stopped' ? (signal || null) : undefined,
       eventCount: run.events.length,
     });
+
     for (const res of run.clients) { try { res.end(); } catch {} }
     run.clients.clear();
-  });
-  run.child = child;
-  // Critical: the CLI blocks forever on a stdin pipe that never sees EOF.
-  // Close it immediately — prompt comes from the argument, not stdin.
-  if (child.stdin) child.stdin.end();
-
-  const pump = (chunk, stream) => {
-    for (const line of chunk.toString().split(/\r?\n/)) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let ev;
-      try {
-        const parsed = JSON.parse(trimmed);
-        ev = { kind: 'json', stream, event: parsed };
-      } catch {
-        ev = { kind: 'raw', stream, text: trimmed };
-      }
-      pushEvent(run, ev);
-    }
   };
-  child.stdout.on('data', (d) => pump(d, 'stdout'));
-  child.stderr.on('data', (d) => pump(d, 'stderr'));
+
+  child.on('error', (err) => finalize(null, null, err));
+  child.on('close', (code, signal) => finalize(code, signal, null));
 
   runs.set(id, run);
-  try { // touch lastUsed in the registry (best effort)
+  try {
     const key = normalizePathKey(cwd);
     const list = readRegistry();
     const i = list.findIndex(p => normalizePathKey(p && p.path) === key);
     if (i >= 0) { list[i].lastUsed = new Date().toISOString(); writeRegistry(list); }
   } catch { /* not a registered project */ }
-  // keep map bounded: evict oldest non-running run (never a live one)
+
   if (runs.size > MAX_RUNS_KEPT) {
     let victim = null;
     for (const r of runs.values()) {
@@ -151,15 +457,15 @@ function stopRun(run) {
   run.stopRequested = true;
   if (process.platform === 'win32') {
     execFile('taskkill', ['/pid', String(run.child.pid), '/T', '/F'], { windowsHide: true }, (err) => {
-      if (err) { try { run.child.kill(); } catch (e) { /* best effort */ } }
+      if (err) { try { run.child.kill(); } catch { /* best effort */ } }
     });
   } else {
-    try { run.child.kill('SIGTERM'); } catch (e) { /* best effort */ }
+    try { run.child.kill('SIGTERM'); } catch { /* best effort */ }
   }
   return true;
 }
 
-// ---------- agent frontmatter parsing (tiny, zero-dep) ----------
+// ---------- safe agent frontmatter & config comment parsing ----------
 function parseAgentFileAt(dir, file) {
   const name = path.basename(file, '.md');
   let content = '';
@@ -167,19 +473,67 @@ function parseAgentFileAt(dir, file) {
   if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
   const m = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   const fm = m ? m[1] : '';
-  const grab = (key) => {
+  const grabFm = (key) => {
     const r = new RegExp(`^${key}:\\s*(.+)$`, 'im').exec(fm);
     return r ? r[1].trim().replace(/^['"]|['"]$/g, '') : null;
   };
-  return { id: name, description: grab('description'), mode: grab('mode'), model: grab('model') };
-}
-function parseAgentFile(file) { return parseAgentFileAt(AGENTS_DIR, file); }
+  // Also parse <!-- ai-team-config: model=... effort=... mode=... -->
+  const cfgMatch = content.match(/<!--\s*ai-team-config:\s*([^>]+?)-->/i);
+  const cfgStr = cfgMatch ? cfgMatch[1] : '';
+  const grabCfg = (key) => {
+    const r = new RegExp(`\\b${key}=([^\\s>]+)`, 'i').exec(cfgStr);
+    return r ? r[1].trim() : null;
+  };
 
-// ---------- per-employee model settings ----------
-const GLOBAL_AGENTS_DIR = path.join(os.homedir(), '.config', 'opencode', 'agents');
+  return {
+    id: name,
+    description: grabFm('description'),
+    mode: grabCfg('mode') || grabFm('mode') || (name === 'dispatcher' ? 'primary' : 'subagent'),
+    model: grabCfg('model') || grabFm('model') || null,
+    effort: (grabCfg('effort') || grabFm('reasoningEffort') || 'default').toLowerCase(),
+  };
+}
+
+function getEffectiveAgentMeta(id) {
+  const engine = activeEngine();
+  const dirs = engine === 'agy'
+    ? [AGY_AGENTS_DIR, GLOBAL_AGY_PLUGIN_AGENTS_DIR, OPENCODE_AGENTS_DIR, GLOBAL_OPENCODE_AGENTS_DIR]
+    : [OPENCODE_AGENTS_DIR, GLOBAL_OPENCODE_AGENTS_DIR, AGY_AGENTS_DIR, GLOBAL_AGY_PLUGIN_AGENTS_DIR];
+
+  let description = '';
+  let mode = id === 'dispatcher' ? 'primary' : 'subagent';
+  let model = null;
+  let effort = 'default';
+  let localModel = null;
+  let globalModel = null;
+
+  const localDirs = engine === 'agy' ? [AGY_AGENTS_DIR, OPENCODE_AGENTS_DIR] : [OPENCODE_AGENTS_DIR, AGY_AGENTS_DIR];
+  const globalDirs = engine === 'agy' ? [GLOBAL_AGY_PLUGIN_AGENTS_DIR, GLOBAL_OPENCODE_AGENTS_DIR] : [GLOBAL_OPENCODE_AGENTS_DIR, GLOBAL_AGY_PLUGIN_AGENTS_DIR];
+
+  for (const d of localDirs) {
+    const p = parseAgentFileAt(d, id + '.md');
+    if (p && p.model && !localModel) localModel = p.model;
+  }
+  for (const d of globalDirs) {
+    const p = parseAgentFileAt(d, id + '.md');
+    if (p && p.model && !globalModel) globalModel = p.model;
+  }
+
+  for (const d of dirs) {
+    const p = parseAgentFileAt(d, id + '.md');
+    if (!p) continue;
+    if (!description && p.description) description = p.description;
+    if (p.mode) mode = p.mode;
+    if (!model && p.model) model = p.model;
+    if (effort === 'default' && p.effort && p.effort !== 'default') effort = p.effort;
+  }
+
+  return { id, description, mode, model: model || 'gemini-3.8-flash-high', localModel, globalModel, effort };
+}
+
 function knownAgentIds() {
   const ids = new Set(ROSTER.map(s => s.id));
-  for (const dir of [AGENTS_DIR, GLOBAL_AGENTS_DIR]) {
+  for (const dir of [AGY_AGENTS_DIR, GLOBAL_AGY_PLUGIN_AGENTS_DIR, OPENCODE_AGENTS_DIR, GLOBAL_OPENCODE_AGENTS_DIR]) {
     try {
       for (const f of fs.readdirSync(dir)) {
         if (f.endsWith('.md')) ids.add(path.basename(f, '.md'));
@@ -188,16 +542,77 @@ function knownAgentIds() {
   }
   return ids;
 }
-let modelCatalogCache = { at: 0, list: [], inflight: null };
+
+// ---------- model catalog & vitals ----------
+let modelCatalogCache = { agy: { at: 0, list: [...DEFAULT_AGY_MODELS], inflight: null }, opencode: { at: 0, list: [], inflight: null } };
 let consoleVitalsCache = { at: 0, value: null, has: false, inflight: null };
 
-function fetchConsoleVitals() {
+function fetchAgyModels() {
   return new Promise((resolve) => {
-    execFile(OPENCODE, ['stats'], { encoding: 'utf8', timeout: 15000, windowsHide: true }, (err, stdout) => {
+    execFile(AGY_BIN, ['models'], { encoding: 'utf8', timeout: 12000, windowsHide: true }, (err, stdout) => {
+      if (err) { resolve(modelCatalogCache.agy.list); return; }
+      const parsed = [];
+      for (const line of String(stdout || '').split(/\r?\n/)) {
+        const m = line.trim().match(/^([a-z0-9][a-z0-9._-]*)\t+(.+)$/i);
+        if (m) parsed.push(m[1].trim());
+      }
+      const list = parsed.length ? [...new Set(parsed)] : modelCatalogCache.agy.list;
+      modelCatalogCache.agy.list = list;
+      modelCatalogCache.agy.at = Date.now();
+      resolve(list);
+    });
+  });
+}
+
+function fetchOpencodeModels() {
+  return new Promise((resolve) => {
+    execFile(OPENCODE_BIN, ['models'], { encoding: 'utf8', timeout: 15000, windowsHide: true }, (err, stdout) => {
+      if (err) { resolve(modelCatalogCache.opencode.list); return; }
+      const list = [...new Set(
+        String(stdout || '').split('\n').map(s => s.trim()).filter(l => /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/i.test(l))
+      )];
+      if (list.length) { modelCatalogCache.opencode.list = list; modelCatalogCache.opencode.at = Date.now(); }
+      resolve(modelCatalogCache.opencode.list);
+    });
+  });
+}
+
+function getModelCatalog(engineOverride) {
+  const engine = engineOverride || activeEngine();
+  const bucket = engine === 'opencode' ? modelCatalogCache.opencode : modelCatalogCache.agy;
+  const FRESH = 10 * 60 * 1000;
+  const now = Date.now();
+  if (bucket.list.length && (now - bucket.at < FRESH)) {
+    return Promise.resolve(bucket.list);
+  }
+  if (bucket.inflight) return bucket.inflight;
+  const fetcher = engine === 'opencode' ? fetchOpencodeModels : fetchAgyModels;
+  const p = fetcher().finally(() => { bucket.inflight = null; });
+  bucket.inflight = p;
+  return p;
+}
+
+function fetchConsoleVitals() {
+  const engine = activeEngine();
+  if (engine === 'agy') {
+    const m = metricsSummary();
+    return Promise.resolve({
+      engine: 'Antigravity (agy)',
+      sessions: String(m.total || 0),
+      subagents: String(ROSTER.length),
+      prompts: String(m.done || 0),
+      steps: m.avgDurationMs ? `${Math.round(m.avgDurationMs / 1000)}s avg` : '0s avg',
+      tokens: 'Individual ($0)',
+      toolSuccess: m.successRate != null ? `${m.successRate}%` : '100%',
+    });
+  }
+  return new Promise((resolve) => {
+    execFile(OPENCODE_BIN, ['stats'], { encoding: 'utf8', timeout: 15000, windowsHide: true }, (err, stdout) => {
       if (err) { resolve(null); return; }
       const out = String(stdout || '').replace(/\x1b\[[0-9;]*m/g, '');
       const grab = re => { const m = out.match(re); return m ? m[1].trim() : null; };
       resolve({
+        engine: 'OpenCode',
         sessions: grab(/(\d+[\d,.]*)\s*sessions/i),
         subagents: grab(/(\d+[\d,.]*)\s*subagents/i),
         prompts: grab(/(\d+[\d,.]*)\s*prompts/i),
@@ -209,69 +624,28 @@ function fetchConsoleVitals() {
   });
 }
 
-// machine-wide console vitals, parsed from `opencode stats` (best effort)
-// 5-min TTL cache + stale-while-revalidate: if a cached value exists but is
-// stale, return it immediately and refresh in the background.
 function consoleVitals() {
+  const engine = activeEngine();
+  if (engine === 'agy') return fetchConsoleVitals();
   const FRESH = 5 * 60 * 1000;
   const now = Date.now();
   if (consoleVitalsCache.has && (now - consoleVitalsCache.at < FRESH)) {
     return Promise.resolve(consoleVitalsCache.value);
   }
-  // stale cache present: kick off a background refresh, serve stale now
-  if (consoleVitalsCache.has && !consoleVitalsCache.inflight) {
-    const p = fetchConsoleVitals().then(v => {
-      consoleVitalsCache.value = v;
-      consoleVitalsCache.has = true;
-      consoleVitalsCache.at = Date.now();
-      return v;
-    }).catch(() => consoleVitalsCache.value).finally(() => { consoleVitalsCache.inflight = null; });
-    consoleVitalsCache.inflight = p;
-  }
-  if (consoleVitalsCache.has) {
-    return Promise.resolve(consoleVitalsCache.value);
-  }
-  // no cached value: fetch and await
   if (!consoleVitalsCache.inflight) {
-    const p = fetchConsoleVitals().then(v => {
+    consoleVitalsCache.inflight = fetchConsoleVitals().then(v => {
       consoleVitalsCache.value = v;
       consoleVitalsCache.has = true;
       consoleVitalsCache.at = Date.now();
       return v;
     }).catch(() => null).finally(() => { consoleVitalsCache.inflight = null; });
-    consoleVitalsCache.inflight = p;
   }
-  return consoleVitalsCache.inflight;
+  return consoleVitalsCache.has ? Promise.resolve(consoleVitalsCache.value) : consoleVitalsCache.inflight;
 }
 
-function fetchModelCatalog() {
-  return new Promise((resolve) => {
-    execFile(OPENCODE, ['models'], { encoding: 'utf8', timeout: 15000, windowsHide: true }, (err, stdout) => {
-      if (err) { resolve(modelCatalogCache.list); return; }
-      const list = [...new Set(
-        String(stdout || '').split('\n').map(s => s.trim()).filter(l => /^[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/i.test(l))
-      )];
-      if (list.length) { modelCatalogCache.list = list; modelCatalogCache.at = Date.now(); }
-      resolve(modelCatalogCache.list);
-    });
-  });
-}
-
-function getModelCatalog() {
-  const FRESH = 10 * 60 * 1000; // 10 minutes
-  const now = Date.now();
-  if (modelCatalogCache.list.length && (now - modelCatalogCache.at < FRESH)) {
-    return Promise.resolve(modelCatalogCache.list);
-  }
-  if (modelCatalogCache.inflight) return modelCatalogCache.inflight;
-  const p = fetchModelCatalog().finally(() => { modelCatalogCache.inflight = null; });
-  modelCatalogCache.inflight = p;
-  return p;
-}
-
-function agentUsage() {
+function agentUsage(targetDir) {
   const per = {};
-  for (const r of readMetrics()) {
+  for (const r of readMetrics(targetDir)) {
     const a = per[r.agent] = per[r.agent] || { total: 0, done: 0, totalMs: 0 };
     a.total += 1;
     if (r.status === 'done') a.done += 1;
@@ -281,54 +655,178 @@ function agentUsage() {
 }
 
 async function agentSettingsPayload() {
-  const catalog = await getModelCatalog();
-  const free = id => /-free$/.test(id);
+  const engine = activeEngine();
+  const catalog = await getModelCatalog(engine);
+  const free = id => engine === 'agy' ? true : /-free$/i.test(id);
   const usage = agentUsage();
   return {
+    engine,
     catalog,
     consoleVitals: await consoleVitals(),
     agents: ROSTER.map(slot => {
-      const local = parseAgentFileAt(AGENTS_DIR, slot.id + '.md');
-      const globalOne = parseAgentFileAt(GLOBAL_AGENTS_DIR, slot.id + '.md');
-      let effort = 'default';
-      try {
-        let raw = fs.readFileSync(path.join(AGENTS_DIR, slot.id + '.md'), 'utf8');
-        if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
-        const m = raw.match(/^reasoningEffort:\s*(\w+)$/mi);
-        if (m) effort = m[1].toLowerCase();
-      } catch { /* no file */ }
+      const meta = getEffectiveAgentMeta(slot.id);
       return {
         id: slot.id, code: slot.code, no: slot.no, color: slot.color,
         blurb: slot.blurb,
-        localModel: local && local.model || null,
-        globalModel: globalOne && globalOne.model || null,
-        effectiveModel: (local && local.model) || (globalOne && globalOne.model) || null,
+        localModel: meta.localModel,
+        globalModel: meta.globalModel,
+        effectiveModel: meta.model,
         usage: usage[slot.id] || { total: 0, done: 0, totalMs: 0 },
-        effort,
+        effort: meta.effort || 'default',
       };
     }),
     freeOnly: catalog.filter(free),
   };
 }
 
-// ---------- distribute the free catalog across the bench ----------
-const PREFERRED_FREE = {
-  dispatcher: 'opencode/glm-5.3-flash-free',          // proven daily driver
-  architect:  'opencode/deepseek-v4.1-flash-free',    // proven for planning
-  qa:         'opencode/nemotron-3.5-super-vl-free',  // vision-capable, fits QA
-  reporter:   'opencode/mimo-v2.6-flash-free',        // writing-flavored
+// ---------- safe frontmatter & config comment writers ----------
+function updateAgyConfigComment(fileContent, updates) {
+  let content = fileContent.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+  const existingMatch = content.match(/<!--\s*ai-team-config:\s*([^>]+?)-->/i);
+  const kv = { model: 'gemini-3.8-flash-high', effort: 'medium', mode: 'subagent' };
+  if (existingMatch) {
+    for (const part of existingMatch[1].trim().split(/\s+/)) {
+      const eq = part.indexOf('=');
+      if (eq > 0) kv[part.slice(0, eq)] = part.slice(eq + 1);
+    }
+  }
+  for (const [k, v] of Object.entries(updates)) {
+    if (v === '' || v == null) delete kv[k];
+    else kv[k] = v;
+  }
+  const newComment = `<!-- ai-team-config: ${Object.entries(kv).map(([k, v]) => `${k}=${v}`).join(' ')} -->`;
+  if (existingMatch) {
+    return content.replace(/<!--\s*ai-team-config:\s*[^>]+?-->/i, newComment);
+  }
+  return content.replace(/^(---\n[\s\S]*?\n---)\n?/, `$1\n${newComment}\n`);
+}
+
+function updateOpencodeFrontmatter(fileContent, key, value) {
+  let content = fileContent.replace(/^\uFEFF/, '');
+  const fmMatch = content.match(/^(---\r?\n)([\s\S]*?)(\r?\n---)/);
+  if (!fmMatch) return content;
+  const nl = fmMatch[1].includes('\r\n') ? '\r\n' : '\n';
+  const lines = fmMatch[2].split(/\r?\n/);
+  const keyRe = new RegExp(`^${key}:\\s*`, 'i');
+  const filtered = lines.filter(l => !keyRe.test(l));
+  if (value !== '' && value != null) {
+    const modelIdx = filtered.findIndex(l => /^model:\s*/i.test(l));
+    if (key === 'reasoningEffort' && modelIdx >= 0) {
+      filtered.splice(modelIdx + 1, 0, `${key}: ${value}`);
+    } else if (key === 'model') {
+      const modeIdx = filtered.findIndex(l => /^mode:\s*/i.test(l));
+      filtered.splice(modeIdx >= 0 ? modeIdx + 1 : filtered.length, 0, `model: ${value}`);
+    } else {
+      filtered.push(`${key}: ${value}`);
+    }
+  }
+  const newFm = `${fmMatch[1]}${filtered.join(nl)}${fmMatch[3]}`;
+  return newFm + content.slice(fmMatch[0].length);
+}
+
+const EFFORT_LEVELS = ['low', 'medium', 'high'];
+
+function setAgentEffort(id, effort) {
+  if (!ROSTER.some(s => s.id === id)) throw new Error(`unknown employee: ${id}`);
+  const level = String(effort || '').toLowerCase();
+  if (level && !EFFORT_LEVELS.includes(level)) {
+    throw new Error(`effort must be one of: ${EFFORT_LEVELS.join(', ')}, or empty for model default`);
+  }
+  const updated = [];
+  for (const dir of [AGY_AGENTS_DIR, GLOBAL_AGY_PLUGIN_AGENTS_DIR]) {
+    const file = path.join(dir, id + '.md');
+    if (!fs.existsSync(file)) continue;
+    const before = fs.readFileSync(file, 'utf8');
+    const after = updateAgyConfigComment(before, { effort: level || 'default' });
+    fs.writeFileSync(file, after, 'utf8');
+    updated.push(dir);
+  }
+  for (const dir of [GLOBAL_OPENCODE_AGENTS_DIR, OPENCODE_AGENTS_DIR]) {
+    const file = path.join(dir, id + '.md');
+    if (!fs.existsSync(file)) continue;
+    const before = fs.readFileSync(file, 'utf8');
+    const after = updateOpencodeFrontmatter(before, 'reasoningEffort', level);
+    fs.writeFileSync(file, after, 'utf8');
+    updated.push(dir);
+  }
+  return updated;
+}
+
+async function setAgentModel(id, model) {
+  if (!ROSTER.some(s => s.id === id)) throw new Error(`unknown employee: ${id}`);
+  const catalog = await getModelCatalog();
+  if (catalog.length && !catalog.includes(model)) {
+    throw new Error(`model not in current catalog: ${model}`);
+  }
+  const updated = [];
+  let found = false;
+  for (const dir of [AGY_AGENTS_DIR, GLOBAL_AGY_PLUGIN_AGENTS_DIR]) {
+    const file = path.join(dir, id + '.md');
+    if (!fs.existsSync(file)) continue;
+    found = true;
+    const before = fs.readFileSync(file, 'utf8');
+    const after = updateAgyConfigComment(before, { model });
+    if (after !== before) {
+      fs.writeFileSync(file, after, 'utf8');
+      updated.push(dir);
+    }
+  }
+  for (const dir of [GLOBAL_OPENCODE_AGENTS_DIR, OPENCODE_AGENTS_DIR]) {
+    const file = path.join(dir, id + '.md');
+    if (!fs.existsSync(file)) continue;
+    found = true;
+    const before = fs.readFileSync(file, 'utf8');
+    const after = updateOpencodeFrontmatter(before, 'model', model);
+    if (after !== before) {
+      fs.writeFileSync(file, after, 'utf8');
+      updated.push(dir);
+    }
+  }
+  if (!found) throw new Error(`no agent file found for ${id}`);
+  return updated;
+}
+
+const PREFERRED_AGY = {
+  dispatcher: 'gemini-3.8-flash-high',
+  architect:  'gemini-4-argon-high',
+  backend:    'gemini-3.8-flash-high',
+  frontend:   'gemini-3.8-flash-high',
+  qa:         'gemini-3.8-flash-high',
+  reviewer:   'gemini-4-argon-high',
+  reporter:   'gemini-3.8-flash-medium',
+  explainer:  'gemini-3.8-flash-high',
+};
+
+const PREFERRED_OPENCODE_FREE = {
+  dispatcher: 'opencode/glm-5.3-flash-free',
+  architect:  'opencode/deepseek-v4.1-flash-free',
+  qa:         'opencode/nemotron-3.5-super-vl-free',
+  reporter:   'opencode/mimo-v2.6-flash-free',
 };
 
 async function distributeFreeModels() {
-  const catalog = await getModelCatalog();
+  const engine = activeEngine();
+  const catalog = await getModelCatalog(engine);
+  if (engine === 'agy') {
+    const assignment = {};
+    const updated = [];
+    for (const slot of ROSTER) {
+      const preferred = PREFERRED_AGY[slot.id] || 'gemini-3.8-flash-high';
+      const pick = catalog.includes(preferred) ? preferred : (catalog[0] || 'gemini-3.8-flash-high');
+      assignment[slot.id] = pick;
+      for (const dir of await setAgentModel(slot.id, pick)) updated.push(dir);
+    }
+    return { assignment, spare: catalog.filter(m => !Object.values(assignment).includes(m)), totalFree: catalog.length, updated: updated.length };
+  }
+
   const free = catalog.filter(m => /-free$/i.test(m));
   if (free.length === 0) throw new Error('the free catalog is empty right now — check `opencode models`');
   const remaining = new Set(free);
   const assignment = {};
   for (const slot of ROSTER) {
-    let pick = PREFERRED_FREE[slot.id];
+    let pick = PREFERRED_OPENCODE_FREE[slot.id];
     if (!pick || !remaining.has(pick)) pick = [...remaining][0];
-    if (!pick) pick = free[0]; // catalog smaller than the bench — wrap rather than fail
+    if (!pick) pick = free[0];
     remaining.delete(pick);
     assignment[slot.id] = pick;
   }
@@ -339,86 +837,21 @@ async function distributeFreeModels() {
   return { assignment, spare: [...remaining], totalFree: free.length, updated: updated.length };
 }
 
-const EFFORT_LEVELS = ['low', 'medium', 'high'];
-function setAgentEffort(id, effort) {
-  if (!ROSTER.some(s => s.id === id)) throw new Error(`unknown employee: ${id}`);
-  const level = String(effort || '').toLowerCase();
-  if (level && !EFFORT_LEVELS.includes(level)) throw new Error(`effort must be one of: ${EFFORT_LEVELS.join(', ')}, or empty for model default`);
-  const updated = [];
-  for (const dir of [GLOBAL_AGENTS_DIR, AGENTS_DIR]) {
-    const file = path.join(dir, id + '.md');
-    if (!fs.existsSync(file)) continue;
-    let content = fs.readFileSync(file, 'utf8');
-    // drop any existing reasoningEffort line, then re-add if a level is set
-    content = content.replace(/^reasoningEffort:[^\n]*\n?/mi, '');
-    if (level) {
-      content = /^model:.*$/m.test(content)
-        ? content.replace(/^model:.*$/m, m => `${m}\nreasoningEffort: ${level}`)
-        : content.replace(/\n---/, `\nreasoningEffort: ${level}\n---`);
-    }
-    fs.writeFileSync(file, content);
-    updated.push(dir);
-  }
-  return updated;
-}
-
-async function setAgentModel(id, model) {
-  if (!ROSTER.some(s => s.id === id)) throw new Error(`unknown employee: ${id}`);
-  const catalog = await getModelCatalog();
-  if (catalog.length && !catalog.includes(model)) throw new Error(`model not in catalog: ${model} — run \`opencode models\` to see current free ones`);
-  const updated = [];
-  let found = false;
-  for (const dir of [GLOBAL_AGENTS_DIR, AGENTS_DIR]) {
-    const file = path.join(dir, id + '.md');
-    if (!fs.existsSync(file)) continue;
-    found = true;
-    const before = fs.readFileSync(file, 'utf8');
-    if (!/^model:.*$/m.test(before)) { fs.writeFileSync(file, before.replace('\n---', `\nmodel: ${model}\n---`)); updated.push(dir + ' (model line added)'); continue; }
-    const after = before.replace(/^model:.*$/m, `model: ${model}`);
-    if (after !== before) { fs.writeFileSync(file, after); updated.push(dir); }
-  }
-  if (!found) throw new Error(`no agent file found for ${id}`);
-  return updated; // empty means "already on this model", not an error
-}
-
-function agentEffortOf(file) {
-  try {
-    let raw = fs.readFileSync(file, 'utf8');
-    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1);
-    const m = raw.match(/^reasoningEffort:\s*(\w+)$/mi);
-    return m ? m[1].toLowerCase() : 'default';
-  } catch { return 'default'; }
-}
-
-function teamPayload() {
-  const files = fs.existsSync(AGENTS_DIR) ? fs.readdirSync(AGENTS_DIR).filter(f => f.endsWith('.md')) : [];
-  const meta = {};
-  for (const f of files) { const p = parseAgentFile(f); if (p) meta[p.id] = p; }
+function teamPayload(targetDir) {
   const activeIds = [...runs.values()].filter(r => r.status === 'running').map(r => r.agent);
-  const usage = agentUsage();
-  return ROSTER.map(slot => ({
-    ...slot,
-    mode: meta[slot.id]?.mode || 'subagent',
-    model: meta[slot.id]?.model || 'inherited',
-    description: meta[slot.id]?.description || '',
-    effort: agentEffortOf(path.join(AGENTS_DIR, slot.id + '.md')),
-    usage: usage[slot.id] || { total: 0, done: 0, totalMs: 0 },
-    busy: activeIds.includes(slot.id),
-  }));
-}
-
-// ---------- team preferences (ours alone — not the CLI's config) ----------
-const PREFS_FILE = path.join(os.homedir(), '.config', 'opencode', 'team-preferences.json');
-function readPrefs() {
-  try { const j = JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8')); return j && typeof j === 'object' ? j : {}; } catch { return {}; }
-}
-function writePrefs(prefs) {
-  fs.mkdirSync(path.dirname(PREFS_FILE), { recursive: true });
-  fs.writeFileSync(PREFS_FILE, JSON.stringify(prefs, null, 2));
-}
-function prefsPayload() {
-  const p = readPrefs();
-  return { modelRouting: p.modelRouting === 'dynamic' ? 'dynamic' : 'static' };
+  const usage = agentUsage(targetDir);
+  return ROSTER.map(slot => {
+    const meta = getEffectiveAgentMeta(slot.id);
+    return {
+      ...slot,
+      mode: meta.mode || 'subagent',
+      model: meta.model || 'gemini-3.8-flash-high',
+      description: meta.description || slot.blurb,
+      effort: meta.effort || 'default',
+      usage: usage[slot.id] || { total: 0, done: 0, totalMs: 0 },
+      busy: activeIds.includes(slot.id),
+    };
+  });
 }
 
 // ---------- project registry (any absolute path, de-duplicated) ----------
@@ -446,9 +879,18 @@ function scaffoldProject({ name, targetPath }) {
   fs.mkdirSync(path.join(dest, 'docs'), { recursive: true });
   fs.mkdirSync(path.join(dest, 'reports'), { recursive: true });
   fs.mkdirSync(path.join(dest, 'journal'), { recursive: true });
-  const copyIfMissing = (src, dst) => { if (!fs.existsSync(dst)) fs.copyFileSync(src, dst); };
+  fs.mkdirSync(path.join(dest, '.agents', 'agents'), { recursive: true });
+
+  const copyIfMissing = (src, dst) => { if (fs.existsSync(src) && !fs.existsSync(dst)) fs.copyFileSync(src, dst); };
   copyIfMissing(path.join(TEMPLATE_DIR, '.gitignore'), path.join(dest, '.gitignore'));
   copyIfMissing(path.join(TEMPLATE_DIR, 'docs', 'report-template.md'), path.join(dest, 'docs', 'report-template.md'));
+
+  if (fs.existsSync(AGY_AGENTS_DIR)) {
+    for (const f of fs.readdirSync(AGY_AGENTS_DIR).filter(x => x.endsWith('.md'))) {
+      copyIfMissing(path.join(AGY_AGENTS_DIR, f), path.join(dest, '.agents', 'agents', f));
+    }
+  }
+
   const agentsDst = path.join(dest, 'AGENTS.md');
   if (!fs.existsSync(agentsDst)) {
     fs.writeFileSync(agentsDst, fs.readFileSync(path.join(TEMPLATE_DIR, 'AGENTS.md'), 'utf8').replaceAll('{{NAME}}', name));
@@ -465,7 +907,51 @@ function scaffoldProject({ name, targetPath }) {
   return { adopted, git, path: dest };
 }
 
-// ---------- run metrics (JSONL, honest history — never breaks a run) ----------
+// ---------- git status inspection ----------
+function getGitStatus(targetDir) {
+  let cwd = ROOT;
+  if (targetDir && typeof targetDir === 'string' && targetDir.trim()) {
+    const resolved = path.resolve(targetDir.trim());
+    if (path.isAbsolute(resolved) && isDir(resolved)) cwd = resolved;
+  }
+  return new Promise((resolve) => {
+    execFile('git', ['-C', cwd, 'status', '--porcelain', '-b'], { encoding: 'utf8', timeout: 5000, windowsHide: true }, (err, stdout) => {
+      if (err) {
+        resolve({ dir: cwd, isRepo: false, branch: null, changedCount: 0, changedFiles: [], commits: [] });
+        return;
+      }
+      const lines = String(stdout || '').split(/\r?\n/).filter(Boolean);
+      const header = lines.shift() || '';
+      let branch = 'HEAD';
+      const bm = header.match(/^##\s+([^\s.]+)(?:\.\.\.([^\s\[]+))?(?:\s+\[(.+)\])?/);
+      if (bm) branch = bm[1];
+      else if (header.startsWith('## ')) branch = header.slice(3).trim();
+
+      const changedFiles = lines.slice(0, 30).map(l => ({
+        status: l.slice(0, 2).trim(),
+        file: l.slice(3).trim(),
+      }));
+
+      execFile('git', ['-C', cwd, 'log', '-n', '5', '--oneline'], { encoding: 'utf8', timeout: 5000, windowsHide: true }, (logErr, logOut) => {
+        const commits = logErr ? [] : String(logOut || '').split(/\r?\n/).filter(Boolean).map(l => {
+          const sp = l.indexOf(' ');
+          return sp > 0 ? { hash: l.slice(0, sp), subject: l.slice(sp + 1) } : { hash: l, subject: '' };
+        });
+        resolve({
+          dir: cwd,
+          isRepo: true,
+          branch,
+          clean: lines.length === 0,
+          changedCount: lines.length,
+          changedFiles,
+          commits,
+        });
+      });
+    });
+  });
+}
+
+// ---------- run metrics (JSONL, honest history — supports project filtering) ----------
 let metricsCache = { key: null, rows: null };
 function appendMetric(entry) {
   try {
@@ -474,22 +960,36 @@ function appendMetric(entry) {
   } catch { /* metrics are best-effort */ }
   metricsCache = { key: null, rows: null };
 }
-function readMetrics() {
+
+function readMetrics(targetDir) {
+  let all = [];
   try {
     const st = fs.statSync(METRICS_FILE);
     const key = st.mtimeMs + ':' + st.size;
-    if (metricsCache.key === key && Array.isArray(metricsCache.rows)) return metricsCache.rows;
-    const rows = fs.readFileSync(METRICS_FILE, 'utf8')
-      .split('\n')
-      .filter(Boolean)
-      .map(l => { try { return JSON.parse(l); } catch { return null; } })
-      .filter(Boolean);
-    metricsCache = { key, rows };
-    return rows;
-  } catch { metricsCache = { key: null, rows: null }; return []; }
+    if (metricsCache.key === key && Array.isArray(metricsCache.rows)) {
+      all = metricsCache.rows;
+    } else {
+      all = fs.readFileSync(METRICS_FILE, 'utf8')
+        .split('\n')
+        .filter(Boolean)
+        .map(l => { try { return JSON.parse(l); } catch { return null; } })
+        .filter(Boolean);
+      metricsCache = { key, rows: all };
+    }
+  } catch {
+    metricsCache = { key: null, rows: null };
+    return [];
+  }
+  if (targetDir && typeof targetDir === 'string' && targetDir.trim()) {
+    const wantKey = normalizePathKey(targetDir.trim());
+    return all.filter(r => normalizePathKey(r.dir || ROOT) === wantKey);
+  }
+  return all;
 }
-function metricsSummary() {
-  const rows = readMetrics();
+
+function metricsSummary(targetDir) {
+  const allRows = readMetrics();
+  const rows = targetDir ? readMetrics(targetDir) : allRows;
   const total = rows.length;
   const done = rows.filter(r => r.status === 'done').length;
   const stopped = rows.filter(r => r.status === 'stopped').length;
@@ -502,6 +1002,8 @@ function metricsSummary() {
   }
   const last = rows.length ? rows[rows.length - 1] : null;
   return {
+    scopedDir: targetDir ? path.resolve(targetDir) : null,
+    globalTotal: allRows.length,
     total,
     done,
     stopped,
@@ -510,7 +1012,7 @@ function metricsSummary() {
     avgDurationMs: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : null,
     perAgent,
     last: last ? {
-      agent: last.agent, status: last.status, endedAt: last.endedAt,
+      agent: last.agent, status: last.status, endedAt: last.endedAt, dir: last.dir,
       task: String(last.task || '').slice(0, 140),
     } : null,
   };
@@ -573,8 +1075,21 @@ const server = http.createServer(async (req, res) => {
 
   try {
     // ---- API ----
-    if (pathname === '/api/team' && req.method === 'GET') return sendJson(res, 200, { roster: teamPayload(), opencode: OPENCODE });
-    if (pathname === '/api/reports' && req.method === 'GET') return sendJson(res, 200, { dir: resolveReportsDir(url.searchParams.get('dir')), reports: listReports(url.searchParams.get('dir')) });
+    if (pathname === '/api/team' && req.method === 'GET') {
+      const engine = activeEngine();
+      return sendJson(res, 200, {
+        roster: teamPayload(url.searchParams.get('dir')),
+        engine,
+        agy: AGY_BIN,
+        opencode: OPENCODE_BIN,
+      });
+    }
+    if (pathname === '/api/git-status' && req.method === 'GET') {
+      return sendJson(res, 200, await getGitStatus(url.searchParams.get('dir')));
+    }
+    if (pathname === '/api/reports' && req.method === 'GET') {
+      return sendJson(res, 200, { dir: resolveReportsDir(url.searchParams.get('dir')), reports: listReports(url.searchParams.get('dir')) });
+    }
     if (pathname.startsWith('/api/reports/') && req.method === 'GET') {
       const name = decodeURIComponent(pathname.slice('/api/reports/'.length));
       const md = readReport(name, url.searchParams.get('dir'));
@@ -638,10 +1153,12 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    if (pathname === '/api/metrics' && req.method === 'GET') return sendJson(res, 200, metricsSummary());
+    if (pathname === '/api/metrics' && req.method === 'GET') {
+      return sendJson(res, 200, metricsSummary(url.searchParams.get('dir')));
+    }
     if (pathname === '/api/runs' && req.method === 'GET') {
       const list = [...runs.values()]
-        .map(({ child, clients, events, ...r }) => ({ ...r, eventCount: events.length }))
+        .map(({ child, clients, events, watchdog, journalTimer, ...r }) => ({ ...r, eventCount: events.length }))
         .sort((a, b) => String(b.startedAt || '').localeCompare(String(a.startedAt || '')));
       return sendJson(res, 200, { runs: list });
     }
@@ -657,8 +1174,8 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const run = startRun({ task, agent, dir: body.dir });
-        pushEvent(run, { kind: 'status', status: 'running', agent, dir: run.dir });
-        return sendJson(res, 200, { id: run.id });
+        pushEvent(run, { kind: 'status', status: 'running', agent, engine: run.engine, model: run.model, dir: run.dir, stages: { ...run.stages } });
+        return sendJson(res, 200, { id: run.id, engine: run.engine, stages: run.stages });
       } catch (e) {
         return sendJson(res, 400, { error: e.message });
       }
@@ -671,13 +1188,27 @@ const server = http.createServer(async (req, res) => {
       stopRun(run);
       return sendJson(res, 200, { ok: true });
     }
-    // ---- team preferences (model routing: static vs dynamic) ----
+    // ---- team preferences (engine, modelRouting, inactivityTimeoutMin) ----
     if (pathname === '/api/preferences' && req.method === 'GET') return sendJson(res, 200, prefsPayload());
     if (pathname === '/api/preferences' && req.method === 'POST') {
       const body = await readJson(req);
-      const value = String(body.modelRouting || '').toLowerCase();
-      if (!['static', 'dynamic'].includes(value)) return sendJson(res, 400, { error: "modelRouting must be 'static' or 'dynamic'" });
-      writePrefs({ ...readPrefs(), modelRouting: value });
+      const current = readPrefs();
+      if (body.modelRouting !== undefined) {
+        const value = String(body.modelRouting || '').toLowerCase();
+        if (!['static', 'dynamic'].includes(value)) return sendJson(res, 400, { error: "modelRouting must be 'static' or 'dynamic'" });
+        current.modelRouting = value;
+      }
+      if (body.engine !== undefined) {
+        const eng = String(body.engine || '').toLowerCase();
+        if (!['agy', 'opencode'].includes(eng)) return sendJson(res, 400, { error: "engine must be 'agy' or 'opencode'" });
+        current.engine = eng;
+      }
+      if (body.inactivityTimeoutMin !== undefined) {
+        const t = Number(body.inactivityTimeoutMin);
+        if (!Number.isFinite(t) || t < 1 || t > 120) return sendJson(res, 400, { error: 'inactivityTimeoutMin must be between 1 and 120' });
+        current.inactivityTimeoutMin = Math.round(t);
+      }
+      writePrefs(current);
       return sendJson(res, 200, prefsPayload());
     }
 
@@ -745,8 +1276,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`AI Team HQ → http://${HOST}:${PORT}`);
-  console.log(`Team root:  ${ROOT}`);
-  console.log(`OpenCode:   ${OPENCODE}`);
-});
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    console.log(`AI Team HQ → http://${HOST}:${PORT}`);
+    console.log(`Team root:  ${ROOT}`);
+    console.log(`Engine:     ${activeEngine()} (agy: ${AGY_BIN})`);
+  });
+}
+
+module.exports = { server, createLineSplitter, updateAgyConfigComment, updateOpencodeFrontmatter };
