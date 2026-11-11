@@ -3,14 +3,18 @@
 
 const state = {
   roster: [],
+  engine: 'agy',
   selectedAgent: 'dispatcher',
   currentRunId: null,
   es: null,
-  cascadeTimer: null,
   elapsedTimer: null,
   runStartedAt: null,
-  litCount: 0,
   currentReportsDir: '',
+  currentReportContent: '',
+  reportViewMode: 'rendered', // 'rendered' | 'raw'
+  autoScroll: true,
+  wireFilter: 'all',
+  projects: [],
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -19,11 +23,15 @@ const logEl = $('#log');
 const wireCursor = $('#wireCursor');
 const sendBtn = $('#sendBtn');
 const stopBtn = $('#stopBtn');
+const detachBtn = $('#detachBtn');
 const clearBtn = $('#clearBtn');
 const connPill = $('#conn');
+const engineBadge = $('#engineBadge');
 const rail = $('#rail');
 const elapsedEl = $('#elapsed');
+const scrollFollowBtn = $('#scrollFollowBtn');
 const STAGES = [...rail.querySelectorAll('.station')];
+
 function setAssignState(mode) {
   if (mode === 'sending') { sendBtn.disabled = true; sendBtn.textContent = 'Assigning…'; }
   else if (mode === 'live') { sendBtn.disabled = true; sendBtn.textContent = 'Run in progress…'; }
@@ -34,60 +42,134 @@ function setAssignState(mode) {
 function tickClock() {
   const now = new Date();
   const el = $('#clock');
+  if (!el) return;
   el.textContent = now.toLocaleTimeString();
   el.setAttribute('datetime', now.toISOString());
 }
 setInterval(tickClock, 1000); tickClock();
 
-/* ---------- log helpers ---------- */
-function logLine(text, cls = 'ln-sys') {
+/* ---------- scroll-lock & log helpers ---------- */
+function isNearBottom(container) {
+  return container.scrollHeight - container.scrollTop - container.clientHeight < 42;
+}
+
+logEl.addEventListener('scroll', () => {
+  state.autoScroll = isNearBottom(logEl);
+  if (scrollFollowBtn) scrollFollowBtn.hidden = state.autoScroll;
+});
+
+if (scrollFollowBtn) {
+  scrollFollowBtn.addEventListener('click', () => {
+    state.autoScroll = true;
+    scrollFollowBtn.hidden = true;
+    logEl.scrollTop = logEl.scrollHeight;
+  });
+}
+
+function logLine(text, cls = 'ln-sys', timeIso = null) {
   const p = document.createElement('div');
   p.className = `ln ${cls}`;
   const t = document.createElement('span');
   t.className = 'ln-time';
-  t.textContent = new Date().toLocaleTimeString();
+  const d = timeIso ? new Date(timeIso) : new Date();
+  t.textContent = Number.isNaN(d.getTime()) ? new Date().toLocaleTimeString() : d.toLocaleTimeString();
   p.append(t, document.createTextNode(text));
   if (wireCursor) logEl.insertBefore(p, wireCursor); else logEl.appendChild(p);
-  logEl.scrollTop = logEl.scrollHeight;
+  if (state.autoScroll) {
+    logEl.scrollTop = logEl.scrollHeight;
+  } else if (scrollFollowBtn) {
+    scrollFollowBtn.hidden = false;
+  }
 }
-function clearEmptyState() { const e = logEl.querySelector('.wire-empty'); if (e) e.remove(); }
 
-/* ---------- line rail lifecycle ---------- */
-function railReset() {
-  clearInterval(state.cascadeTimer); clearInterval(state.elapsedTimer);
-  state.litCount = 0; state.runStartedAt = Date.now();
-  STAGES.forEach(s => s.classList.remove('lit', 'done', 'failed'));
-  state.cascadeTimer = setInterval(() => {
-    if (state.litCount < STAGES.length - 1) {           // hold 'report' until the run ends
-      STAGES[state.litCount].classList.add('lit');
-      state.litCount += 1;
-    }
-  }, 1800);
-  state.elapsedTimer = setInterval(() => {
-    const s = Math.floor((Date.now() - state.runStartedAt) / 1000);
-    elapsedEl.textContent = `elapsed ${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-  }, 1000);
+function clearEmptyState() {
+  const e = logEl.querySelector('.wire-empty');
+  if (e) e.remove();
 }
-function railFinish(ok, opts) {
-  clearInterval(state.cascadeTimer); clearInterval(state.elapsedTimer);
-  const interrupted = !!(opts && opts.interrupted);
-  const wasLit = STAGES.map(s => s.classList.contains('lit'));
-  STAGES.forEach((s, i) => {
-    s.classList.remove('lit');
-    if (ok || wasLit[i]) s.classList.add('done');
+
+/* ---------- wire filter pills ---------- */
+document.querySelectorAll('.wf-chip').forEach(btn => {
+  btn.addEventListener('click', () => {
+    state.wireFilter = btn.dataset.filter || 'all';
+    document.querySelectorAll('.wf-chip').forEach(b => b.classList.toggle('active', b === btn));
+    if (state.wireFilter === 'all') logEl.removeAttribute('data-filter');
+    else logEl.setAttribute('data-filter', state.wireFilter);
   });
-  if (!ok && !interrupted && STAGES.length) STAGES[STAGES.length - 1].classList.add('failed');
-  const total = Math.floor((Date.now() - state.runStartedAt) / 1000);
+});
+
+/* ---------- real event-driven line rail ---------- */
+function startElapsedTimer(startedAtIso) {
+  clearInterval(state.elapsedTimer);
+  const parsed = startedAtIso ? new Date(startedAtIso).getTime() : Date.now();
+  state.runStartedAt = Number.isNaN(parsed) ? Date.now() : parsed;
+  const update = () => {
+    const s = Math.max(0, Math.floor((Date.now() - state.runStartedAt) / 1000));
+    elapsedEl.textContent = `elapsed ${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  };
+  update();
+  state.elapsedTimer = setInterval(update, 1000);
+}
+
+function applyRailStages(stages) {
+  if (!stages || typeof stages !== 'object') return;
+  for (const s of STAGES) {
+    const key = s.dataset.stage;
+    const st = stages[key] || 'idle';
+    s.classList.remove('lit', 'done', 'failed');
+    if (st === 'lit') s.classList.add('lit');
+    else if (st === 'done') s.classList.add('done');
+    else if (st === 'failed') s.classList.add('failed');
+  }
+}
+
+function railReset(agent = 'dispatcher', startedAtIso = null) {
+  STAGES.forEach(s => s.classList.remove('lit', 'done', 'failed'));
+  const initial = { intake: 'lit', plan: 'idle', build: 'idle', test: 'idle', review: 'idle', report: 'idle' };
+  const agentStageMap = { architect: 'plan', backend: 'build', frontend: 'build', qa: 'test', reviewer: 'review', reporter: 'report', explainer: 'report' };
+  if (agent !== 'dispatcher' && agentStageMap[agent]) {
+    initial.intake = 'done';
+    initial[agentStageMap[agent]] = 'lit';
+  }
+  applyRailStages(initial);
+  startElapsedTimer(startedAtIso);
+}
+
+function railFinish(ok, opts) {
+  clearInterval(state.elapsedTimer);
+  const interrupted = !!(opts && opts.interrupted);
+  if (opts && opts.stages) {
+    applyRailStages(opts.stages);
+  } else {
+    const wasLit = STAGES.map(s => s.classList.contains('lit') || s.classList.contains('done'));
+    STAGES.forEach((s, i) => {
+      s.classList.remove('lit');
+      if (ok || wasLit[i]) s.classList.add('done');
+    });
+    if (!ok && !interrupted && STAGES.length) {
+      STAGES[STAGES.length - 1].classList.remove('done');
+      STAGES[STAGES.length - 1].classList.add('failed');
+    }
+  }
+  const total = Math.max(0, Math.floor((Date.now() - (state.runStartedAt || Date.now())) / 1000));
   elapsedEl.textContent = `${ok ? 'done in' : 'stopped after'} ${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
 
 /* ---------- crew ---------- */
+function selectedDir() {
+  return ($('#dirInput')?.value || '').trim();
+}
+
 async function fetchTeam() {
   try {
-    const r = await fetch('/api/team');
+    const dir = selectedDir();
+    const r = await fetch('/api/team' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     state.roster = data.roster;
+    state.engine = data.engine || 'agy';
+    if (engineBadge) {
+      engineBadge.textContent = state.engine === 'agy' ? 'agy · antigravity' : 'opencode · cli';
+    }
     renderAgentSelect(data.roster);
     renderBadges(data.roster);
     const busy = data.roster.filter(a => a.busy).length;
@@ -97,10 +179,12 @@ async function fetchTeam() {
     setConn('err', 'console unreachable');
   }
 }
+
 function setConn(kind, text) {
   connPill.textContent = text;
   connPill.className = 'stamp-pill ' + (kind === 'go' ? 'stamp-go' : kind === 'live' ? 'stamp-live' : 'stamp-err');
 }
+
 function renderAgentSelect(roster) {
   const sel = $('#agentSelect');
   if (sel.options.length) return;
@@ -113,11 +197,13 @@ function renderAgentSelect(roster) {
   sel.value = state.selectedAgent;
   sel.addEventListener('change', () => selectAgent(sel.value));
 }
+
 function selectAgent(id) {
   state.selectedAgent = id;
   $('#agentSelect').value = id;
   document.querySelectorAll('.badge').forEach(b => b.classList.toggle('selected', b.dataset.agent === id));
 }
+
 function renderBadges(roster) {
   crewEl.innerHTML = '';
   for (const a of roster) {
@@ -140,7 +226,7 @@ function renderBadges(roster) {
       <span class="badge-stamp">${a.code}</span>
       <span class="badge-name">${a.id}</span>
       <span class="badge-duty">${a.blurb}</span>
-      <span class="badge-stats" aria-label="Lifetime usage">${statLine}</span>
+      <span class="badge-stats" aria-label="Project usage">${statLine}</span>
       <span class="badge-foot">
         <span class="badge-model">${String(a.model).replace(/^opencode\//, '')}</span>
         <span class="badge-state ${a.busy ? 'live' : ''}">${a.busy ? 'on shift' : 'standby'}</span>
@@ -167,8 +253,9 @@ async function loadProjects() {
       if (p.path.toLowerCase() === current) o.selected = true;
       sel.appendChild(o);
     }
-  } catch { /* registry unavailable — text field still works */ }
+  } catch { /* registry unavailable */ }
 }
+
 async function registerCurrentFolder() {
   const dir = $('#dirInput').value.trim();
   if (!dir) return logLine('nothing to register — type a folder path first', 'ln-err');
@@ -180,8 +267,27 @@ async function registerCurrentFolder() {
   if (!r.ok) return logLine(`not registered: ${data.error || 'unknown error'} — double-check the folder exists on disk`, 'ln-err');
   logLine(`registered “${data.path}” — it will appear under known projects`, 'ln-done');
   loadProjects();
-  fetchReports();
+  refreshProjectContext();
 }
+
+async function unregisterSelectedFolder() {
+  const dir = $('#dirInput').value.trim() || $('#projectSelect').value.trim();
+  if (!dir) return logLine('select a project or type a registered folder path to unregister', 'ln-err');
+  const r = await fetch('/api/projects', {
+    method: 'DELETE',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: dir }),
+  });
+  if (!r.ok) return logLine('could not unregister folder', 'ln-err');
+  logLine(`unregistered “${dir}” from known projects`, 'ln-sys');
+  if ($('#dirInput').value.trim().toLowerCase() === dir.toLowerCase()) {
+    $('#dirInput').value = '';
+    localStorage.removeItem('hq.dir');
+  }
+  loadProjects();
+  refreshProjectContext();
+}
+
 async function createProject() {
   const name = $('#newProjectName').value.trim();
   const targetPath = $('#newProjectPath').value.trim();
@@ -199,7 +305,69 @@ async function createProject() {
   $('#newProjectPanel').hidden = true;
   $('#toggleNewProject').setAttribute('aria-expanded', 'false');
   loadProjects();
-  fetchReports();
+  refreshProjectContext();
+}
+
+/* ---------- git status inspector ---------- */
+async function fetchGitStatus() {
+  const pill = $('#gitPill');
+  if (!pill) return;
+  try {
+    const dir = selectedDir();
+    const r = await fetch('/api/git-status' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
+    const g = await r.json();
+    if (!g.isRepo) {
+      pill.textContent = '⎇ not a git repo';
+      pill.className = 'git-pill';
+      return;
+    }
+    pill.textContent = `⎇ ${g.branch} · ${g.clean ? 'clean' : `${g.changedCount} modified`}`;
+    pill.className = `git-pill ${g.clean ? 'clean' : 'dirty'}`;
+    const branchLbl = $('#gitBranchLabel');
+    if (branchLbl) branchLbl.textContent = g.branch || 'HEAD';
+
+    const filesList = $('#gitFilesList');
+    if (filesList) {
+      filesList.innerHTML = '';
+      if (!g.changedFiles || !g.changedFiles.length) {
+        filesList.textContent = 'Working tree clean — ready for branch or merge.';
+      } else {
+        for (const f of g.changedFiles) {
+          const item = el('div', 'git-item');
+          item.append(el('span', 'git-badge', f.status || 'M'), el('span', null, f.file));
+          filesList.appendChild(item);
+        }
+      }
+    }
+
+    const commitsList = $('#gitCommitsList');
+    if (commitsList) {
+      commitsList.innerHTML = '';
+      if (!g.commits || !g.commits.length) {
+        commitsList.textContent = 'No commits on this branch yet.';
+      } else {
+        for (const c of g.commits) {
+          const item = el('div', 'git-item');
+          item.append(el('span', 'git-hash', c.hash), el('span', null, c.subject));
+          commitsList.appendChild(item);
+        }
+      }
+    }
+  } catch {
+    pill.textContent = '⎇ git unavailable';
+  }
+}
+
+const gitPill = $('#gitPill');
+const gitPanel = $('#gitPanel');
+if (gitPill && gitPanel) {
+  gitPill.addEventListener('click', () => {
+    gitPanel.hidden = !gitPanel.hidden;
+    if (!gitPanel.hidden) fetchGitStatus();
+  });
+}
+if ($('#closeGitPanel')) {
+  $('#closeGitPanel').addEventListener('click', () => { gitPanel.hidden = true; });
 }
 
 /* ---------- run metrics ---------- */
@@ -209,29 +377,173 @@ function fmtDuration(ms) {
   if (s < 60) return `${s}s`;
   return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
 }
+
 async function fetchMetrics() {
   try {
-    const r = await fetch('/api/metrics');
+    const dir = selectedDir();
+    const r = await fetch('/api/metrics' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
     const m = await r.json();
-    const el = $('#metricsNote');
-    if (!m.total) { el.textContent = 'no runs on record yet — assign one above'; return; }
+    const elx = $('#metricsNote');
+    if (!m.total) {
+      elx.innerHTML = dir
+        ? `no runs in this project yet (${m.globalTotal || 0} global) — assign one above`
+        : 'no runs on record yet — assign one above';
+      return;
+    }
     const last = m.last;
     const lastBit = last
       ? `<span class="m-cell">last: <b>${last.agent}</b> <span class="${last.status === 'done' ? 'm-ok' : 'm-bad'}">${last.status === 'done' ? '✓' : '✗'} ${last.status}</span></span>`
       : '';
-    el.innerHTML =
-      `<span class="m-cell"><b>${m.total}</b> filed</span>` +
+    const scopeNote = (dir && m.globalTotal !== m.total) ? ` <span class="m-dim">(${m.globalTotal} total)</span>` : '';
+    elx.innerHTML =
+      `<span class="m-cell"><b>${m.total}</b> filed${scopeNote}</span>` +
       `<span class="m-cell"><b>${m.successRate}%</b> green</span>` +
       `<span class="m-cell">avg <b>${fmtDuration(m.avgDurationMs)}</b></span>` +
-      lastBit +
-      `<span class="m-dim">reports/.metrics.jsonl</span>`;
+      lastBit;
   } catch { /* strip stays as-is */ }
 }
 
-/* ---------- reports (follows the selected project folder) ---------- */
-function selectedDir() {
-  return ($('#dirInput')?.value || '').trim();
+/* ---------- safe zero-dep markdown renderer for reports ---------- */
+function escapeHtml(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
+
+function formatInlineMd(line) {
+  let s = escapeHtml(line);
+  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+  return s;
+}
+
+function renderMarkdown(md) {
+  const lines = String(md || '').replace(/\r\n/g, '\n').split('\n');
+  const out = [];
+  let inCode = false;
+  let codeLines = [];
+  let inList = false;
+  let inTable = false;
+  let tableHeaderDone = false;
+
+  const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+  const closeTable = () => { if (inTable) { out.push('</tbody></table>'); inTable = false; tableHeaderDone = false; } };
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    if (raw.trim().startsWith('```')) {
+      closeList(); closeTable();
+      if (!inCode) {
+        inCode = true;
+        codeLines = [];
+      } else {
+        out.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+        inCode = false;
+      }
+      continue;
+    }
+    if (inCode) {
+      codeLines.push(raw);
+      continue;
+    }
+
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      closeList(); closeTable();
+      continue;
+    }
+
+    // Table row
+    if (trimmed.startsWith('|') && trimmed.endsWith('|')) {
+      closeList();
+      const cells = trimmed.slice(1, -1).split('|').map(c => c.trim());
+      if (cells.every(c => /^[-:]+$/.test(c))) continue; // separator row
+      if (!inTable) {
+        out.push('<table><thead><tr>' + cells.map(c => `<th>${formatInlineMd(c)}</th>`).join('') + '</tr></thead><tbody>');
+        inTable = true;
+        tableHeaderDone = true;
+      } else {
+        out.push('<tr>' + cells.map(c => `<td>${formatInlineMd(c)}</td>`).join('') + '</tr>');
+      }
+      continue;
+    }
+    closeTable();
+
+    // Headings
+    const hm = trimmed.match(/^(#{1,3})\s+(.+)$/);
+    if (hm) {
+      closeList();
+      const lvl = hm[1].length;
+      out.push(`<h${lvl}>${formatInlineMd(hm[2])}</h${lvl}>`);
+      continue;
+    }
+
+    // List item
+    const lm = trimmed.match(/^[-*]\s+(.+)$/);
+    if (lm) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push(`<li>${formatInlineMd(lm[1])}</li>`);
+      continue;
+    }
+    closeList();
+
+    out.push(`<p>${formatInlineMd(trimmed)}</p>`);
+  }
+  closeList(); closeTable();
+  if (inCode) out.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
+  return out.join('\n');
+}
+
+function updateReportDisplay() {
+  const preEl = $('#reportBody');
+  const renEl = $('#reportRendered');
+  const toggleBtn = $('#toggleReportMode');
+  const copyBtn = $('#copyReportBtn');
+  if (!state.currentReportContent) {
+    if (renEl) renEl.hidden = true;
+    if (preEl) preEl.hidden = false;
+    if (toggleBtn) toggleBtn.hidden = true;
+    if (copyBtn) copyBtn.hidden = true;
+    return;
+  }
+  if (toggleBtn) {
+    toggleBtn.hidden = false;
+    toggleBtn.textContent = state.reportViewMode === 'rendered' ? 'Raw MD' : 'Rendered';
+  }
+  if (copyBtn) copyBtn.hidden = false;
+  if (state.reportViewMode === 'rendered' && renEl) {
+    renEl.innerHTML = renderMarkdown(state.currentReportContent);
+    renEl.hidden = false;
+    preEl.hidden = true;
+  } else {
+    preEl.textContent = state.currentReportContent;
+    preEl.hidden = false;
+    if (renEl) renEl.hidden = true;
+  }
+}
+
+if ($('#toggleReportMode')) {
+  $('#toggleReportMode').addEventListener('click', () => {
+    state.reportViewMode = state.reportViewMode === 'rendered' ? 'raw' : 'rendered';
+    updateReportDisplay();
+  });
+}
+
+if ($('#copyReportBtn')) {
+  $('#copyReportBtn').addEventListener('click', async () => {
+    if (!state.currentReportContent) return;
+    try {
+      await navigator.clipboard.writeText(state.currentReportContent);
+      $('#copyReportBtn').textContent = 'Copied ✓';
+      setTimeout(() => { $('#copyReportBtn').textContent = 'Copy'; }, 2000);
+    } catch { /* ignore */ }
+  });
+}
+
+/* ---------- reports (follows the selected project folder) ---------- */
 async function fetchReports() {
   try {
     const dir = selectedDir();
@@ -244,6 +556,8 @@ async function fetchReports() {
     const ledgerDir = $('#ledgerDir');
     if (ledgerDir) ledgerDir.textContent = state.currentReportsDir ? `${state.currentReportsDir}\\` : '';
     if (!data.reports.length) {
+      state.currentReportContent = '';
+      updateReportDisplay();
       if (title) title.textContent = 'Nothing here';
       const body = $('#reportBody'); if (body) body.textContent = 'Nothing filed yet.' + (state.currentReportsDir ? '\n\n' + state.currentReportsDir + '\\' : '');
     }
@@ -269,6 +583,7 @@ async function fetchReports() {
     }
   } catch { /* leave panel as-is */ }
 }
+
 async function openReport(name) {
   $('#reportTitle').textContent = name;
   const stamp = $('#filedStamp'); if (stamp) stamp.hidden = false;
@@ -278,66 +593,242 @@ async function openReport(name) {
     const dir = selectedDir();
     const r = await fetch('/api/reports/' + encodeURIComponent(name) + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
     const data = await r.json();
-    $('#reportBody').textContent = data.content || '(empty file)';
+    state.currentReportContent = data.content || '(empty file)';
+    updateReportDisplay();
   } catch {
+    state.currentReportContent = '';
+    updateReportDisplay();
     $('#reportBody').textContent = 'This report could not be opened. Check that reports/ is readable.';
   }
 }
 
 /* ---------- dispatch + stream ---------- */
-function closeStream() { if (state.es) { state.es.close(); state.es = null; } stopBtn.disabled = true; }
+function closeStream() {
+  if (state.es) { state.es.close(); state.es = null; }
+  stopBtn.disabled = true;
+  if (detachBtn) detachBtn.hidden = true;
+}
+
+function detachCurrentRun() {
+  if (!state.currentRunId) return;
+  logLine(`detached viewer from ${state.currentRunId} (run continues in background — re-attach via run ledger)`, 'ln-sys');
+  closeStream();
+  clearInterval(state.elapsedTimer);
+  state.currentRunId = null;
+  logEl.classList.remove('running');
+  setAssignState('idle');
+  fetchLedger();
+}
+
+if (detachBtn) {
+  detachBtn.addEventListener('click', detachCurrentRun);
+}
 
 function renderJsonEvent(ev) {
   const e = ev.event || {};
-  const text = e?.part?.text ?? e?.text ?? e?.message ?? null;
-  const tool = e?.part?.tool ?? e?.tool ?? e?.name ?? null;
-  const type = e?.type ?? e?.kind ?? 'event';
-  if (typeof text === 'string' && text.trim()) return logLine(text.trim(), 'ln-text');
-  if (tool) return logLine(`[tool] ${tool}`, 'ln-tool');
+  const ts = ev.ts || null;
+  const type = String(e.event ?? e.type ?? e.kind ?? '').toLowerCase();
+
+  // Thinking / reasoning stream
+  const thought = e.thought ?? (type === 'thought' ? (e.message || e.text || e.content) : null);
+  if (typeof thought === 'string' && thought.trim()) {
+    return logLine(`💭 ${thought.trim()}`, 'ln-thought', ts);
+  }
+
+  // Tool invocation
+  const tool = e?.part?.tool ?? e?.tool ?? (type === 'tool_use' || type === 'tool_call' ? (e.name || e.tool) : null);
+  if (tool) {
+    const input = e.input || e.args || e?.part?.input || null;
+    const argPreview = input ? ' ' + JSON.stringify(input).slice(0, 120) : '';
+    return logLine(`[tool] ${tool}${argPreview}`, 'ln-tool', ts);
+  }
+
+  // Result / assistant output text
+  const text = e?.part?.text ?? e?.output ?? e?.text ?? e?.message ?? e?.content ?? null;
+  if (typeof text === 'string' && text.trim()) {
+    return logLine(text.trim(), 'ln-text', ts);
+  }
+
+  // Start event
+  if (type === 'start') {
+    return logLine(`session initialized (${e.agent || e.model || 'agent ready'})`, 'ln-sys', ts);
+  }
+
   const raw = JSON.stringify(e);
-  logLine(`${type} ${raw.length > 200 ? raw.slice(0, 200) + '…' : raw}`, 'ln-sys');
+  logLine(`${type || 'event'} ${raw.length > 200 ? raw.slice(0, 200) + '…' : raw}`, 'ln-sys', ts);
 }
+
 function handleEvent(ev) {
   clearEmptyState();
-  if (ev.kind === 'status') {
-    if (ev.status === 'running') return logLine(`run started${ev.dir ? ' in ' + ev.dir : ''}`, 'ln-sys');
-    logEl.classList.remove('running');
-    if (ev.status === 'done') {
-      logLine('✓ run finished', 'ln-done');
-      railFinish(true);
-    } else if (ev.status === 'stopped') {
-      logLine('■ run stopped', 'ln-err');
-      railFinish(false, { interrupted: true });
-    } else {
-      logLine(`✗ run ${ev.status} (exit ${ev.exitCode ?? '?'})`, 'ln-err');
-      railFinish(false);
-    }
-    closeStream(); setAssignState('idle'); state.currentRunId = null; fetchTeam(); fetchReports(); fetchMetrics();
+  const ts = ev.ts || null;
+
+  if (ev.kind === 'stage') {
+    if (ev.stages) applyRailStages(ev.stages);
+    logLine(`→ station [${ev.stage}] ${ev.status === 'done' ? 'completed ✓' : 'active'} (${ev.agent || ''})`, 'ln-stage', ts);
+    return;
+  }
+
+  if (ev.kind === 'journal') {
+    const e = ev.entry || {};
+    logLine(`📋 shift log [${ev.agent}]: ${e.summary || e.status || 'done'}`, 'ln-done', ts);
     if (shiftsOn) fetchJournal();
     return;
   }
+
+  if (ev.kind === 'status') {
+    if (ev.stages) applyRailStages(ev.stages);
+    if (ev.status === 'running') {
+      const eng = ev.engine ? ` [${ev.engine}]` : '';
+      return logLine(`run started${eng}${ev.dir ? ' in ' + ev.dir : ''}`, 'ln-sys', ts);
+    }
+    logEl.classList.remove('running');
+    if (ev.status === 'done') {
+      logLine('✓ run finished', 'ln-done', ts);
+      railFinish(true, { stages: ev.stages });
+    } else if (ev.status === 'stopped') {
+      logLine('■ run stopped', 'ln-err', ts);
+      railFinish(false, { interrupted: true, stages: ev.stages });
+    } else {
+      logLine(`✗ run ${ev.status} (${ev.error || ('exit ' + (ev.exitCode ?? '?'))})`, 'ln-err', ts);
+      railFinish(false, { stages: ev.stages });
+    }
+    closeStream();
+    setAssignState('idle');
+    state.currentRunId = null;
+    refreshProjectContext();
+    fetchLedger();
+    return;
+  }
   if (ev.kind === 'json') return renderJsonEvent(ev);
-  if (ev.kind === 'raw') return logLine(ev.text, ev.stream === 'stderr' ? 'ln-err' : 'ln-text');
+  if (ev.kind === 'raw') return logLine(ev.text, ev.stream === 'stderr' ? 'ln-err' : 'ln-text', ts);
 }
 
-async function fetchLedger() { /* run ledger renders here — filled in with the ledger view */ }
+let replayEs = null;
+
+async function fetchLedger() {
+  try {
+    const r = await fetch('/api/runs');
+    const data = await r.json();
+    const list = Array.isArray(data.runs) ? data.runs : [];
+    renderLedger(list);
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+function projectBasename(dir) {
+  return String(dir || '').split(/[\\/]/).filter(Boolean).pop() || '—';
+}
+
+function renderLedger(runs) {
+  runLedger.innerHTML = '';
+  if (!runs.length) {
+    runLedger.appendChild(el('div', 'run-empty', 'No runs this session — assign a task and it lands here.'));
+    return;
+  }
+  for (const run of runs) {
+    const status = ['running', 'done', 'stopped', 'error'].includes(run.status) ? run.status : 'error';
+    const row = el('div', 'run-row');
+    const main = el('button', 'run-main');
+    main.type = 'button';
+    main.setAttribute('aria-label', status === 'running' ? `Attach to live run ${run.id}` : `Replay run ${run.id} (status ${status})`);
+    const started = run.startedAt ? new Date(run.startedAt) : null;
+    const timeText = started && !Number.isNaN(started.getTime()) ? started.toLocaleTimeString() : '—';
+    let durationText = '—';
+    if (started && !Number.isNaN(started.getTime())) {
+      const end = run.endedAt ? new Date(run.endedAt) : new Date();
+      if (!Number.isNaN(end.getTime())) durationText = fmtDuration(Math.max(0, end - started));
+    }
+    main.append(
+      el('span', `run-chip ${status}`, status),
+      el('span', 'run-time', timeText),
+      el('span', 'run-agent', String(run.agent || '—')),
+      el('span', 'run-project', projectBasename(run.dir)),
+      el('span', 'run-duration', durationText),
+      el('span', 'run-task', String(run.task || '').slice(0, 100))
+    );
+    main.addEventListener('click', () => {
+      if (status === 'running') attachRun(run.id, run);
+      else replayRun(run.id, run);
+    });
+    row.appendChild(main);
+    if (status === 'running') {
+      if (run.id === state.currentRunId) row.appendChild(el('span', 'run-live-hint', '● live'));
+      const stopOne = el('button', 'btn btn-danger btn-small run-stop', 'Stop');
+      stopOne.type = 'button';
+      stopOne.setAttribute('aria-label', `Stop ${run.id}`);
+      stopOne.addEventListener('click', async () => {
+        try { await fetch(`/api/runs/${encodeURIComponent(run.id)}/stop`, { method: 'POST' }); } catch { /* ignore */ }
+        logLine('stop requested — halting run process', 'ln-err');
+        fetchLedger();
+      });
+      row.appendChild(stopOne);
+    }
+    runLedger.appendChild(row);
+  }
+}
+
+function attachRun(id, runMeta = null) {
+  if (state.currentRunId === id) {
+    showWireView();
+    return;
+  }
+  if (state.currentRunId) detachCurrentRun();
+  showWireView();
+  setAssignState('live');
+  if (runMeta) {
+    railReset(runMeta.agent || 'dispatcher', runMeta.startedAt);
+    if (runMeta.stages) applyRailStages(runMeta.stages);
+  }
+  watchRun(id);
+}
+
+function replayRun(id, runMeta = null) {
+  if (state.currentRunId) detachCurrentRun();
+  showWireView();
+  clearEmptyState();
+  const stale = logEl.querySelectorAll(':scope > .ln');
+  stale.forEach(n => n.remove());
+  logLine(`replaying ${id}`, 'ln-sys');
+  if (runMeta && runMeta.stages) applyRailStages(runMeta.stages);
+  if (replayEs) { replayEs.close(); replayEs = null; }
+  const es = new EventSource('/api/stream?run=' + encodeURIComponent(id));
+  replayEs = es;
+  es.onmessage = (m) => {
+    let ev;
+    try { ev = JSON.parse(m.data); } catch { logLine(m.data, 'ln-sys'); return; }
+    if (ev.kind === 'status' && ev.status !== 'running') {
+      if (ev.stages) applyRailStages(ev.stages);
+      if (ev.status === 'done') logLine('✓ run finished', 'ln-done', ev.ts);
+      else if (ev.status === 'stopped') logLine('■ run stopped', 'ln-err', ev.ts);
+      else logLine(`✗ run ${ev.status} (exit ${ev.exitCode ?? '?'})`, 'ln-err', ev.ts);
+      es.close(); if (replayEs === es) replayEs = null;
+      return;
+    }
+    handleEvent(ev);
+  };
+  es.onerror = () => { es.close(); if (replayEs === es) replayEs = null; };
+}
 
 function watchRun(id) {
+  if (replayEs) { replayEs.close(); replayEs = null; }
   closeStream();
   state.currentRunId = id;
   logEl.classList.add('running');
   stopBtn.disabled = false;
+  if (detachBtn) detachBtn.hidden = false;
   state.es = new EventSource('/api/stream?run=' + encodeURIComponent(id));
   state.es.onmessage = (m) => { try { handleEvent(JSON.parse(m.data)); } catch { logLine(m.data, 'ln-sys'); } };
   state.es.onerror = () => { logEl.classList.remove('running'); closeStream(); state.currentRunId = null; setAssignState('idle'); fetchLedger(); };
 }
 
 async function dispatchTask(task, dir) {
-  if (state.currentRunId) return logLine('a run is already streaming — stop it first or open the run ledger', 'ln-err');
+  if (state.currentRunId) return logLine('a run is already attached — click Detach or Stop run first', 'ln-err');
   clearEmptyState();
   logLine(`assigning to @${state.selectedAgent}: “${task}”`, 'ln-sys');
   setAssignState('sending');
-  railReset();
+  railReset(state.selectedAgent);
   try {
     const r = await fetch('/api/run', {
       method: 'POST',
@@ -345,7 +836,13 @@ async function dispatchTask(task, dir) {
       body: JSON.stringify({ task, agent: state.selectedAgent, dir }),
     });
     const data = await r.json();
-    if (!r.ok) { logLine(`not assigned: ${data.error || 'unknown error'} — check the project path and try again`, 'ln-err'); railFinish(false); setAssignState('idle'); return; }
+    if (!r.ok) {
+      logLine(`not assigned: ${data.error || 'unknown error'} — check the project path and try again`, 'ln-err');
+      railFinish(false);
+      setAssignState('idle');
+      return;
+    }
+    if (data.stages) applyRailStages(data.stages);
     watchRun(data.id);
     setAssignState('live');
   } catch (e) {
@@ -354,6 +851,42 @@ async function dispatchTask(task, dir) {
     setAssignState('idle');
   }
 }
+
+/* ---------- quick task templates ---------- */
+const TASK_TEMPLATES = {
+  feature: {
+    agent: 'dispatcher',
+    prompt: 'Team, take this feature through the full pipeline (plan -> build -> test -> review -> report): ',
+  },
+  plan: {
+    agent: 'architect',
+    prompt: 'Produce an implementation plan (Goal, Acceptance criteria, Files to modify, Design notes, Risks, Test strategy) for: ',
+  },
+  qa: {
+    agent: 'qa',
+    prompt: 'Run the full test suite, diagnose any failures, add missing tests for recent changes, and report the verdict.',
+  },
+  review: {
+    agent: 'reviewer',
+    prompt: 'Perform a read-only code review of the current branch diff (correctness, security, data integrity, performance, maintainability) and output your verdict.',
+  },
+  explain: {
+    agent: 'explainer',
+    prompt: 'Read this project end-to-end and write docs/PROJECT-GUIDE.md covering purpose, stack, run commands, architecture, data flow, and gotchas.',
+  },
+};
+
+document.querySelectorAll('.tpl-chip').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const tpl = TASK_TEMPLATES[btn.dataset.tpl];
+    if (!tpl) return;
+    selectAgent(tpl.agent);
+    const input = $('#taskInput');
+    input.value = tpl.prompt;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+});
 
 /* ---------- wire up ---------- */
 $('#taskForm').addEventListener('submit', (e) => {
@@ -364,11 +897,13 @@ $('#taskForm').addEventListener('submit', (e) => {
   $('#taskInput').value = '';
   dispatchTask(task, dir);
 });
+
 stopBtn.addEventListener('click', async () => {
   if (!state.currentRunId) return;
   await fetch(`/api/runs/${encodeURIComponent(state.currentRunId)}/stop`, { method: 'POST' });
-  logLine('stop requested — the crew will halt at the next safe point', 'ln-err');
+  logLine('stop requested — halting run process', 'ln-err');
 });
+
 clearBtn.addEventListener('click', () => {
   const active = !!(state.es || state.currentRunId);
   if (active && !confirm('A run is streaming. Clear the log display only?')) return;
@@ -382,19 +917,30 @@ clearBtn.addEventListener('click', () => {
     if (wireCursor) logEl.insertBefore(empty, wireCursor); else logEl.appendChild(empty);
   }
 });
+
+function refreshProjectContext() {
+  fetchTeam();
+  fetchReports();
+  fetchMetrics();
+  fetchGitStatus();
+  if (shiftsOn) fetchJournal();
+}
+
 $('#refreshReports').addEventListener('click', fetchReports);
 $('#projectSelect').addEventListener('change', (e) => {
   if (!e.target.value) return;
   $('#dirInput').value = e.target.value;
   localStorage.setItem('hq.dir', e.target.value);
-  fetchReports();
-  if (shiftsOn) fetchJournal();
+  refreshProjectContext();
 });
 $('#dirInput').addEventListener('change', () => {
   localStorage.setItem('hq.dir', $('#dirInput').value.trim());
-  fetchReports();
+  refreshProjectContext();
 });
 $('#registerProjectBtn').addEventListener('click', registerCurrentFolder);
+if ($('#unregisterProjectBtn')) {
+  $('#unregisterProjectBtn').addEventListener('click', unregisterSelectedFolder);
+}
 $('#toggleNewProject').addEventListener('click', () => {
   const panel = $('#newProjectPanel');
   panel.hidden = !panel.hidden;
@@ -404,19 +950,26 @@ $('#toggleNewProject').addEventListener('click', () => {
 $('#createProjectBtn').addEventListener('click', createProject);
 $('#dirInput').value = localStorage.getItem('hq.dir') || '';
 
-fetchTeam();
-fetchReports();
-loadProjects();
-fetchMetrics();
-setInterval(fetchTeam, 5000);
-setInterval(fetchReports, 10000);
-setInterval(fetchMetrics, 15000);
-setInterval(() => { if (shiftsOn) fetchJournal(); }, 15000);
-
 /* ---------- shift log ---------- */
 const shiftViewBtn = $('#shiftViewBtn');
 const shiftView = $('#shiftView');
 let shiftsOn = false;
+
+/* ---------- run ledger ---------- */
+const runLedgerBtn = $('#runLedgerBtn');
+const runLedger = $('#runLedger');
+let ledgerOn = false;
+
+function showWireView() {
+  shiftsOn = false; ledgerOn = false;
+  shiftViewBtn.setAttribute('aria-pressed', 'false');
+  shiftViewBtn.textContent = 'shift log';
+  runLedgerBtn.setAttribute('aria-pressed', 'false');
+  $('#log').hidden = false;
+  if ($('#wireToolbar')) $('#wireToolbar').hidden = false;
+  shiftView.hidden = true;
+  runLedger.hidden = true;
+}
 
 function el(tag, cls, text) {
   const d = document.createElement(tag);
@@ -424,6 +977,7 @@ function el(tag, cls, text) {
   if (text != null) d.textContent = text;
   return d;
 }
+
 function renderShiftView(data) {
   shiftView.innerHTML = '';
   for (const a of data.agents) {
@@ -448,21 +1002,35 @@ function renderShiftView(data) {
     shiftView.appendChild(row);
   }
 }
+
 async function fetchJournalData() {
-  const dir = $('#dirInput').value.trim();
+  const dir = selectedDir();
   const r = await fetch('/api/journal' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
   return r.json();
 }
 async function fetchJournal() {
-  try { renderShiftView(await fetchJournalData()); } catch { /* leave the panel as-is */ }
+  try { renderShiftView(await fetchJournalData()); } catch { /* leave panel as-is */ }
 }
+
 shiftViewBtn.addEventListener('click', () => {
   shiftsOn = !shiftsOn;
+  if (shiftsOn) { ledgerOn = false; runLedgerBtn.setAttribute('aria-pressed', 'false'); runLedger.hidden = true; }
   shiftViewBtn.setAttribute('aria-pressed', String(shiftsOn));
   shiftViewBtn.textContent = shiftsOn ? 'live wire' : 'shift log';
   $('#log').hidden = shiftsOn;
+  if ($('#wireToolbar')) $('#wireToolbar').hidden = shiftsOn;
   shiftView.hidden = !shiftsOn;
   if (shiftsOn) fetchJournal();
+});
+
+runLedgerBtn.addEventListener('click', () => {
+  ledgerOn = !ledgerOn;
+  if (ledgerOn) { shiftsOn = false; shiftViewBtn.setAttribute('aria-pressed', 'false'); shiftViewBtn.textContent = 'shift log'; shiftView.hidden = true; }
+  runLedgerBtn.setAttribute('aria-pressed', String(ledgerOn));
+  $('#log').hidden = ledgerOn;
+  if ($('#wireToolbar')) $('#wireToolbar').hidden = ledgerOn;
+  runLedger.hidden = !ledgerOn;
+  if (ledgerOn) fetchLedger();
 });
 
 /* ---------- stage sheet (rail drill-down) ---------- */
@@ -472,7 +1040,7 @@ const STAGE_DEFS = {
   build:  { owners: ['backend', 'frontend'] },
   test:   { owners: ['qa'] },
   review: { owners: ['reviewer'] },
-  report: { owners: ['reporter'] },
+  report: { owners: ['reporter', 'explainer'] },
 };
 const stageSheet = $('#stageSheet');
 const stageTitle = $('#stageTitle');
@@ -493,7 +1061,6 @@ async function openStageSheet(key) {
   stageTitle.textContent = key;
   stageBody.innerHTML = '';
 
-  // who owns this station
   const secOwners = el('div', 'stage-section');
   secOwners.appendChild(el('h3', null, 'handled by'));
   const ownersWrap = el('div', 'stage-owners');
@@ -510,30 +1077,29 @@ async function openStageSheet(key) {
   secOwners.appendChild(ownersWrap);
   stageBody.appendChild(secOwners);
 
-  // intake also shows what the last run was
   if (key === 'intake') {
     const sec = el('div', 'stage-section');
     sec.appendChild(el('h3', null, 'last run in this project'));
     const box = el('div', 'stage-run');
     try {
-      const m = await fetch('/api/metrics').then(r => r.json());
+      const dir = selectedDir();
+      const m = await fetch('/api/metrics' + (dir ? '?dir=' + encodeURIComponent(dir) : '')).then(r => r.json());
       if (m && m.last) {
         box.append('dispatched to ', el('b', null, m.last.agent), ' · ');
         const s = el('span', m.last.status === 'done' ? 'run-ok' : 'run-bad', m.last.status);
         box.append(s, el('br'), document.createTextNode(m.last.task || '—'));
       } else {
-        box.textContent = 'No runs on record — assign the crew a task first.';
+        box.textContent = 'No runs on record for this project — assign the crew a task first.';
       }
     } catch { box.textContent = 'Metrics unavailable.'; }
     sec.appendChild(box);
     stageBody.appendChild(sec);
   }
 
-  // what the shift log holds for this station
   const secJ = el('div', 'stage-section');
   secJ.appendChild(el('h3', null, 'from the shift log'));
   let data = null;
-  try { data = await fetchJournalData(); } catch { /* fall through to empty state */ }
+  try { data = await fetchJournalData(); } catch { /* fall through */ }
   const entries = [];
   for (const id of def.owners) {
     const a = data && data.agents.find(x => x.id === id);
@@ -561,7 +1127,7 @@ async function openStageSheet(key) {
 document.querySelectorAll('.station').forEach(b => b.addEventListener('click', () => openStageSheet(b.dataset.stage)));
 $('#closeStageSheet').addEventListener('click', closeStageSheet);
 
-/* ---------- crew setup (per-employee model) ---------- */
+/* ---------- crew setup (per-employee model & engine settings) ---------- */
 const settingsOverlay = $('#settingsOverlay');
 const settingsBody = $('#settingsBody');
 let settingsPrevFocus = null;
@@ -570,6 +1136,7 @@ function openSettings() {
   settingsPrevFocus = document.activeElement;
   settingsOverlay.hidden = false;
   $('#closeSettings').focus();
+  loadPreferences();
   loadSettings();
 }
 function closeSettings() {
@@ -577,6 +1144,7 @@ function closeSettings() {
   if (settingsPrevFocus && settingsPrevFocus.focus) settingsPrevFocus.focus();
 }
 $('#openSettings').addEventListener('click', openSettings);
+if (engineBadge) engineBadge.addEventListener('click', openSettings);
 $('#closeSettings').addEventListener('click', closeSettings);
 $('#settingsDone').addEventListener('click', closeSettings);
 settingsOverlay.addEventListener('click', (e) => { if (e.target.hasAttribute('data-settings-close')) closeSettings(); });
@@ -597,11 +1165,15 @@ function renderVitals(v) {
   const elx = $('#settingsVitals');
   if (!v) { elx.innerHTML = ''; return; }
   const chips = [
-    ['sessions', v.sessions], ['subagents', v.subagents], ['prompts', v.prompts],
-    ['steps', v.steps], ['tokens', v.tokens], ['tool success', v.toolSuccess],
+    ['engine', v.engine],
+    ['runs', v.sessions],
+    ['employees', v.subagents],
+    ['green runs', v.prompts],
+    ['speed', v.steps],
+    ['plan', v.tokens],
+    ['success rate', v.toolSuccess],
   ].filter(([, n]) => n);
-  elx.innerHTML = chips.map(([k, n]) => `<span class="vital-chip"><b>${n}</b> ${k}</span>`).join('') +
-    '<span class="vital-chip" title="The free lane does not publish remaining allowance">free quota: <b>remaining — not published</b></span>';
+  elx.innerHTML = chips.map(([k, n]) => `<span class="vital-chip"><b>${n}</b> ${k}</span>`).join('');
 }
 
 function renderSettings(data) {
@@ -643,7 +1215,7 @@ function renderSettings(data) {
           body: JSON.stringify({ id: a.id, [field]: value }),
         });
         const out = await r.json();
-        if (r.ok) flash('saved ✓', true); else flash(out.error || 'failed', false);
+        if (r.ok) { flash('saved ✓', true); fetchTeam(); } else flash(out.error || 'failed', false);
       } catch (e) { flash(String(e.message || e), false); }
     };
 
@@ -653,7 +1225,7 @@ function renderSettings(data) {
     for (const m of data.catalog) {
       const o = document.createElement('option');
       o.value = m;
-      o.textContent = m.replace(/^opencode\//, '') + (free.has(m) ? ' · free' : '');
+      o.textContent = m.replace(/^opencode\//, '') + (free.has(m) ? ' · included' : '');
       if (m === current) o.selected = true;
       sel.appendChild(o);
     }
@@ -688,50 +1260,79 @@ const distributeNote = $('#distributeNote');
 async function distributeFree() {
   distributeFreeBtn.disabled = true;
   distributeNote.hidden = false;
-  distributeNote.textContent = 'spreading the free catalog…';
+  distributeNote.textContent = 'assigning recommended models…';
   try {
     const r = await fetch('/api/agents/distribute', { method: 'POST' });
     const data = await r.json();
-    if (!r.ok) { distributeNote.textContent = `not spread: ${data.error || 'unknown error'}`; return; }
+    if (!r.ok) { distributeNote.textContent = `not assigned: ${data.error || 'unknown error'}`; return; }
     const lines = Object.entries(data.assignment).map(([id, m]) => `${id} → ${m.replace(/^opencode\//, '')}`);
-    distributeNote.textContent = `Spread ${data.totalFree} free models across the bench: ${lines.join(' · ')}${data.spare.length ? ` — spare: ${data.spare.map(m => m.replace(/^opencode\//, '')).join(', ')}` : ''}`;
+    distributeNote.textContent = `Assigned models across the bench: ${lines.join(' · ')}`;
     loadSettings();
+    fetchTeam();
   } catch (e) {
-    distributeNote.textContent = `not spread: ${String(e.message || e)}`;
+    distributeNote.textContent = `not assigned: ${String(e.message || e)}`;
   } finally {
     distributeFreeBtn.disabled = false;
   }
 }
 distributeFreeBtn.addEventListener('click', distributeFree);
 
-/* ---------- model routing preference ---------- */
+/* ---------- preferences (engine, routing, watchdog) ---------- */
 const routingStaticBtn = $('#routingStatic');
 const routingDynamicBtn = $('#routingDynamic');
-function setRoutingUI(value) {
-  routingStaticBtn.setAttribute('aria-pressed', String(value === 'static'));
-  routingDynamicBtn.setAttribute('aria-pressed', String(value === 'dynamic'));
+const engineAgyBtn = $('#engineAgy');
+const engineOpencodeBtn = $('#engineOpencode');
+const timeoutInput = $('#timeoutInput');
+
+function setPrefsUI(p) {
+  if (!p) return;
+  routingStaticBtn.setAttribute('aria-pressed', String(p.modelRouting === 'static'));
+  routingDynamicBtn.setAttribute('aria-pressed', String(p.modelRouting === 'dynamic'));
+  if (engineAgyBtn && engineOpencodeBtn) {
+    engineAgyBtn.setAttribute('aria-pressed', String(p.engine !== 'opencode'));
+    engineOpencodeBtn.setAttribute('aria-pressed', String(p.engine === 'opencode'));
+  }
+  if (timeoutInput && p.inactivityTimeoutMin) {
+    timeoutInput.value = String(p.inactivityTimeoutMin);
+  }
 }
+
 async function loadPreferences() {
   try {
     const r = await fetch('/api/preferences');
     const p = await r.json();
-    setRoutingUI(p.modelRouting);
-  } catch { /* leave the toggle as-is */ }
+    setPrefsUI(p);
+  } catch { /* leave as-is */ }
 }
-async function setRouting(value) {
+
+async function updatePreference(patch) {
   try {
     const r = await fetch('/api/preferences', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ modelRouting: value }),
+      body: JSON.stringify(patch),
     });
     const p = await r.json();
-    if (r.ok) setRoutingUI(p.modelRouting);
-  } catch { /* leave the toggle as-is */ }
+    if (r.ok) {
+      setPrefsUI(p);
+      fetchTeam();
+      if (!settingsOverlay.hidden && patch.engine) loadSettings();
+    }
+  } catch { /* leave as-is */ }
 }
-routingStaticBtn.addEventListener('click', () => setRouting('static'));
-routingDynamicBtn.addEventListener('click', () => setRouting('dynamic'));
-loadPreferences();
+
+routingStaticBtn.addEventListener('click', () => updatePreference({ modelRouting: 'static' }));
+routingDynamicBtn.addEventListener('click', () => updatePreference({ modelRouting: 'dynamic' }));
+if (engineAgyBtn) engineAgyBtn.addEventListener('click', () => updatePreference({ engine: 'agy' }));
+if (engineOpencodeBtn) engineOpencodeBtn.addEventListener('click', () => updatePreference({ engine: 'opencode' }));
+if (timeoutInput) {
+  timeoutInput.addEventListener('change', () => {
+    const val = Number(timeoutInput.value);
+    if (Number.isFinite(val) && val >= 1 && val <= 120) {
+      updatePreference({ inactivityTimeoutMin: val });
+    }
+  });
+}
 
 /* ---------- field guide ---------- */
 const guideOverlay = $('#guideOverlay');
@@ -756,7 +1357,12 @@ guideOverlay.addEventListener('click', (e) => { if (e.target.hasAttribute('data-
 
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '');
-  if (e.key === 'Escape') { if (!settingsOverlay.hidden) { closeSettings(); return; } if (!stageSheet.hidden) { closeStageSheet(); return; } if (!guideOverlay.hidden) closeGuide(); return; }
+  if (e.key === 'Escape') {
+    if (!settingsOverlay.hidden) { closeSettings(); return; }
+    if (!stageSheet.hidden) { closeStageSheet(); return; }
+    if (!guideOverlay.hidden) { closeGuide(); return; }
+    return;
+  }
   if (typing) {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.closest && e.target.closest('#taskForm')) {
       e.preventDefault();
@@ -768,3 +1374,23 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === '?') { e.preventDefault(); guideOverlay.hidden ? openGuide() : closeGuide(); }
 });
 if (!localStorage.getItem('hq.guideSeen')) openGuide();
+
+/* ---------- initial bootstrap & auto-attach to live run ---------- */
+async function initDashboard() {
+  loadProjects();
+  loadPreferences();
+  refreshProjectContext();
+  const runsList = await fetchLedger();
+  const activeRun = runsList.find(r => r.status === 'running');
+  if (activeRun && !state.currentRunId) {
+    attachRun(activeRun.id, activeRun);
+  }
+}
+
+initDashboard();
+setInterval(fetchTeam, 5000);
+setInterval(fetchReports, 10000);
+setInterval(fetchMetrics, 15000);
+setInterval(fetchGitStatus, 12000);
+setInterval(() => { if (shiftsOn) fetchJournal(); }, 10000);
+setInterval(() => { if (ledgerOn) fetchLedger(); }, 8000);

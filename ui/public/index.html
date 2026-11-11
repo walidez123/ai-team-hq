@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="theme-color" content="#E9EBE3" />
   <title>AI Team HQ — the dispatch room</title>
-  <meta name="description" content="Local console for running a crew of AI software employees: assign a task, watch it through plan, build, test and review, read the filed report." />
+  <meta name="description" content="Local console for running a crew of AI software employees on Antigravity AI: assign a task, watch it through plan, build, test and review, read the filed report." />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><rect x=%2212%22 y=%2212%22 width=%2276%22 height=%2276%22 fill=%22%2320272E%22/><rect x=%2230%22 y=%2234%22 width=%2240%22 height=%226%22 fill=%22%23E9EBE3%22/><rect x=%2230%22 y=%2247%22 width=%2228%22 height=%226%22 fill=%22%23E8590C%22/><rect x=%2230%22 y=%2260%22 width=%2234%22 height=%226%22 fill=%22%23E9EBE3%22/></svg>" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -20,7 +20,7 @@
     <div class="mast-left">
       <div class="wordmark">
         <h1>AI Team <span class="hq">HQ</span></h1>
-        <p class="wordmark-sub"><span class="sq" aria-hidden="true"></span>the dispatch room</p>
+        <p class="wordmark-sub"><span class="sq" aria-hidden="true"></span>the dispatch room · powered by antigravity</p>
       </div>
       <svg class="seal" viewBox="0 0 120 120" role="img" aria-label="AI Team — the dispatch room seal">
         <defs>
@@ -28,11 +28,12 @@
         </defs>
         <circle cx="60" cy="60" r="56" fill="none" stroke="currentColor" stroke-width="3" />
         <circle cx="60" cy="60" r="30" fill="none" stroke="currentColor" stroke-width="2" />
-        <text class="seal-text"><textPath href="#seal-arc">· AI TEAM · THE DISPATCH ROOM · EST. 2026 · NO API KEYS REQUIRED</textPath></text>
+        <text class="seal-text"><textPath href="#seal-arc">· AI TEAM · ANTIGRAVITY DISPATCH · EST. 2026 · ZERO API KEYS</textPath></text>
         <text class="seal-core" x="60" y="66" text-anchor="middle">HQ</text>
       </svg>
     </div>
     <div class="masthead-right">
+      <button id="engineBadge" type="button" class="engine-pill" data-tip="Active AI engine — click to configure in Crew setup">agy · antigravity</button>
       <span id="conn" class="stamp-pill stamp-go" role="status">line clear</span>
       <time id="clock" class="clock" aria-label="Local time">--:--:--</time>
       <button id="openSettings" class="help-btn" aria-label="Crew setup — assign models per employee" title="Crew setup">
@@ -45,7 +46,7 @@
     </div>
   </header>
 
-  <!-- The one signature element: the pipeline, drawn as a railroad line -->
+  <!-- The signature element: the pipeline, driven by real stage events -->
   <div class="rail-wrap">
     <ol class="rail" id="rail" aria-label="Pipeline stages — click a station for details">
       <li><button class="station" type="button" data-stage="intake" data-tip="What came in — and who took it" aria-label="Intake — what came in, who took it"><span class="st-dot"></span><span class="st-label">intake</span></button></li>
@@ -58,8 +59,26 @@
     <output id="elapsed" class="elapsed" aria-live="off"></output>
   </div>
 
-  <!-- console vitals — persisted in reports/.metrics.jsonl -->
-  <div class="metrics-bar" id="metricsNote" aria-live="polite" data-tip="Lifetime journal of runs — honest numbers, filed in reports/.metrics.jsonl.">no runs on record yet — assign one above</div>
+  <!-- console vitals & git branch bar -->
+  <div class="metrics-bar">
+    <div id="metricsNote" class="metrics-cells" aria-live="polite" data-tip="Project & lifetime journal of runs — honest numbers, filed in reports/.metrics.jsonl.">no runs on record yet — assign one above</div>
+    <button type="button" id="gitPill" class="git-pill" data-tip="Current Git branch & working tree status in the active project. Click to inspect.">⎇ checking git…</button>
+  </div>
+
+  <!-- Collapsible Git Status & Commits Inspector -->
+  <section id="gitPanel" class="git-drawer" hidden aria-label="Git repository status">
+    <div class="git-drawer-inner">
+      <div class="git-col">
+        <h3>Working tree (<span id="gitBranchLabel">main</span>)</h3>
+        <div id="gitFilesList" class="git-list">Clean working tree.</div>
+      </div>
+      <div class="git-col">
+        <h3>Recent commits</h3>
+        <div id="gitCommitsList" class="git-list">No commits yet.</div>
+      </div>
+      <button type="button" id="closeGitPanel" class="btn btn-quiet btn-small">Close</button>
+    </div>
+  </section>
 
   <main class="board" id="main" tabindex="-1">
 
@@ -78,16 +97,19 @@
         <h2 id="wire-h">Live wire</h2>
         <div class="wire-controls">
           <select id="agentSelect" aria-label="Who takes this task" data-tip="Dispatcher runs the full pipeline, or pick one employee for focused work."></select>
-          <button id="stopBtn" class="btn btn-quiet" disabled data-tip="Halt the current run at the next safe point.">Stop run</button>
+          <button id="detachBtn" class="btn btn-quiet btn-small" hidden data-tip="Detach viewer without stopping the background run.">Detach</button>
+          <button id="stopBtn" class="btn btn-danger btn-small" disabled data-tip="Halt the current run process immediately.">Stop run</button>
           <button id="shiftViewBtn" class="btn btn-quiet btn-small" aria-pressed="false" data-tip="Per-employee shift log — one line each, straight from their journals.">shift log</button>
-          <button id="clearBtn" class="btn btn-quiet" data-tip="Wipe the log. A run in progress keeps streaming.">Clear wire</button>
+          <button id="runLedgerBtn" class="btn btn-quiet btn-small" aria-pressed="false" data-tip="This session's runs — attach to one still running, replay a finished one, stop it.">run ledger</button>
+          <button id="clearBtn" class="btn btn-quiet btn-small" data-tip="Wipe the log. A run in progress keeps streaming.">Clear wire</button>
         </div>
       </div>
 
       <form id="taskForm" class="intake">
         <div class="proj-row">
           <select id="projectSelect" aria-label="Known projects" data-tip="Folders you've registered — pick one to assign work inside it."><option value="">known projects…</option></select>
-          <button type="button" id="registerProjectBtn" class="btn btn-quiet btn-small" data-tip="Add the folder path below this bar to your known projects." title="Register the folder path below as a known project">Register folder</button>
+          <button type="button" id="registerProjectBtn" class="btn btn-quiet btn-small" data-tip="Add the folder path below to your known projects." title="Register the folder path below as a known project">Register folder</button>
+          <button type="button" id="unregisterProjectBtn" class="btn btn-quiet btn-small" data-tip="Remove the selected folder from known projects (does not delete files)." title="Unregister selected project">Unregister</button>
           <button type="button" id="toggleNewProject" class="btn btn-quiet btn-small" aria-expanded="false" aria-controls="newProjectPanel" data-tip="Scaffold a fresh git repo + team files, or adopt an existing folder.">New project…</button>
         </div>
 
@@ -97,7 +119,17 @@
             <input id="newProjectPath" type="text" name="project-path" autocomplete="off" spellcheck="false" placeholder="full path — e.g. C:\work\invoice-cli…" />
             <button id="createProjectBtn" class="btn btn-assign" type="button">Create &amp; scaffold</button>
           </div>
-          <p class="new-project-note">Fresh folder: git init + AGENTS.md + report template. Existing non-empty folder: adds only what's missing, never overwrites.</p>
+          <p class="new-project-note">Fresh folder: git init + AGENTS.md + .agents/agents + report template. Existing folder: adds only what's missing, never overwrites.</p>
+        </div>
+
+        <!-- Quick-dispatch prompt templates -->
+        <div class="template-bar" role="group" aria-label="Quick task templates">
+          <span class="tpl-label">templates:</span>
+          <button type="button" class="tpl-chip" data-tpl="feature">⚡ Full Feature</button>
+          <button type="button" class="tpl-chip" data-tpl="plan">🗺️ Architecture Plan</button>
+          <button type="button" class="tpl-chip" data-tpl="qa">🧪 Run &amp; Fix Tests</button>
+          <button type="button" class="tpl-chip" data-tpl="review">🔍 Security &amp; Diff Review</button>
+          <button type="button" class="tpl-chip" data-tpl="explain">📖 Explain Codebase</button>
         </div>
 
         <textarea id="taskInput" rows="2" required
@@ -113,11 +145,24 @@
         </div>
       </form>
 
+      <!-- Live wire filter bar -->
+      <div class="wire-toolbar" id="wireToolbar">
+        <div class="wire-filters" role="group" aria-label="Filter live wire events">
+          <button type="button" class="wf-chip active" data-filter="all">All</button>
+          <button type="button" class="wf-chip" data-filter="text">Output</button>
+          <button type="button" class="wf-chip" data-filter="thought">Thoughts</button>
+          <button type="button" class="wf-chip" data-filter="tool">Tools</button>
+          <button type="button" class="wf-chip" data-filter="err">Errors</button>
+        </div>
+        <button type="button" id="scrollFollowBtn" class="scroll-follow-btn" hidden>↓ Resume auto-scroll</button>
+      </div>
+
       <div id="log" class="wire-log" aria-live="polite">
         <p class="wire-empty">Quiet on the wire. Assign a task — the crew plans it, builds it, tests it, reviews it and files a report, in that order.</p>
         <span id="wireCursor" class="wire-cursor" aria-hidden="true"></span>
       </div>
       <div id="shiftView" class="shift-view" hidden></div>
+      <div id="runLedger" class="run-ledger" hidden></div>
     </section>
 
     <!-- Filed reports -->
@@ -134,15 +179,20 @@
         <div class="ledger-head">
           <span id="reportTitle">Nothing open</span>
           <span id="ledgerDir" class="ledger-dir"></span>
-          <span id="filedStamp" class="filed-stamp" hidden>FILED</span>
+          <div class="ledger-actions">
+            <button type="button" id="toggleReportMode" class="btn btn-quiet btn-tiny" hidden title="Switch between Rendered Markdown and Raw text">Raw MD</button>
+            <button type="button" id="copyReportBtn" class="btn btn-quiet btn-tiny" hidden title="Copy report Markdown to clipboard">Copy</button>
+            <span id="filedStamp" class="filed-stamp" hidden>FILED</span>
+          </div>
         </div>
+        <div id="reportRendered" class="ledger-rendered" hidden></div>
         <pre id="reportBody">When work finishes, the report lands in <code>reports/</code> and can be opened here.</pre>
       </article>
     </section>
   </main>
 
   <footer class="colophon">
-    <span>AI Team HQ · a local console, it runs on this machine and nowhere else</span>
+    <span>AI Team HQ · a local console powered by Antigravity AI, running on this machine</span>
     <span>Set in Archivo &amp; IBM Plex Mono · <span id="reportCount">0</span> reports on file</span>
   </footer>
 
@@ -165,7 +215,7 @@
       <header class="guide-head">
         <div>
           <h2 id="settingsTitle">Crew setup</h2>
-          <p>Assign a model to each employee. Applies to the <b>next dispatch</b> — runs already in flight are untouched.</p>
+          <p>Assign an Antigravity or OpenCode model to each employee. Applies to the <b>next dispatch</b> — runs already in flight are untouched.</p>
         </div>
         <button class="guide-close" id="closeSettings" aria-label="Close settings">×</button>
       </header>
@@ -175,14 +225,23 @@
       <div class="settings-body" id="settingsBody"></div>
 
       <footer class="guide-foot">
-        <small>Saved straight into <code>.opencode/agents/&lt;name&gt;.md</code> (global + this project). Models ending in <code>-free</code> cost nothing today; paid ones error on dispatch until you add keys. <b>Effort</b> is passed through as <code>reasoningEffort</code> if the model supports it.</small>
-        <div class="pref-bar" role="group" aria-label="How models are chosen">
-          <span class="pref-label">model choice</span>
-          <button class="seg" id="routingStatic" aria-pressed="true" data-tip="You pick each employee's model — the dispatcher uses them as configured">static — you pick</button>
-          <button class="seg" id="routingDynamic" aria-pressed="false" data-tip="The dispatcher reads each brief and reaches for the deep tier (−deep agents) on hard steps">dynamic — dispatcher routes</button>
+        <small>Saved into <code>.agents/agents/&lt;name&gt;.md</code> &amp; global plugin <code>~/.gemini/config/plugins/ai-team</code> (plus <code>.opencode/agents/</code>). <b>Effort</b> is passed through as <code>--effort</code> / <code>reasoningEffort</code>.</small>
+        <div class="pref-bar" role="group" aria-label="Engine and routing configuration">
+          <span class="pref-label">engine</span>
+          <button type="button" class="seg" id="engineAgy" aria-pressed="true" data-tip="Use Google Antigravity CLI (agy) — recommended primary engine">Antigravity (agy)</button>
+          <button type="button" class="seg" id="engineOpencode" aria-pressed="false" data-tip="Use OpenCode CLI (opencode) fallback engine">OpenCode</button>
+          <span class="pref-sep">·</span>
+          <span class="pref-label">routing</span>
+          <button type="button" class="seg" id="routingStatic" aria-pressed="true" data-tip="You pick each employee's model — the dispatcher uses them as configured">static — you pick</button>
+          <button type="button" class="seg" id="routingDynamic" aria-pressed="false" data-tip="The dispatcher reads each brief and reaches for the deep tier (−deep agents) on hard steps">dynamic — dispatcher routes</button>
+          <span class="pref-sep">·</span>
+          <label class="timeout-label">
+            <span class="pref-label">watchdog (min)</span>
+            <input type="number" id="timeoutInput" min="1" max="120" value="10" class="timeout-input" data-tip="Inactivity timeout in minutes before halting a hung run." />
+          </label>
         </div>
         <div class="pref-buttons">
-          <button id="distributeFree" class="btn btn-quiet btn-small" title="Deal the free catalog across the 8 employees — no single model carries everyone">Spread free models</button>
+          <button id="distributeFree" class="btn btn-quiet btn-small" title="Assign recommended models across the 8 employees">Assign recommended models</button>
           <button id="settingsDone" class="btn btn-assign">Done</button>
         </div>
       </footer>
@@ -202,29 +261,21 @@
       </header>
 
       <div class="guide-grid">
-        <div class="guide-item"><div class="guide-num">1</div><div><h3>Masthead — status, clock, crew setup, guide</h3><p>Top-right. <code>line clear</code> means nobody is working; <code>crew working (n)</code> means n runs in flight. The <b>gear</b> opens Crew setup — assign a model to each employee (saved to their agent files; applies next dispatch). The <b>?</b> reopens this guide any time. <code>Esc</code> closes all three.</p></div></div>
+        <div class="guide-item"><div class="guide-num">1</div><div><h3>Masthead — engine, status, clock, crew setup</h3><p>Top-right. Shows the active engine (<code>agy · antigravity</code>), status (<code>line clear</code> or <code>crew working (n)</code>), and local time. The <b>gear</b> opens Crew setup to pick models, switch engines, or configure the watchdog timer.</p></div></div>
 
-        <div class="guide-item"><div class="guide-num">2</div><div><h3>The line rail</h3><p>The six stations a task passes through: intake, plan, build, test, review, report. Stations glow terracotta while a run is live and stamp sage when it's done — with an elapsed timer on the right edge. Click any station to open its drill-down: who owns it, their model, and what landed in the shift log there.</p></div></div>
+        <div class="guide-item"><div class="guide-num">2</div><div><h3>The real-time line rail</h3><p>The six stations a task passes through: intake, plan, build, test, review, report. Stations light up dynamically as subagents are invoked or file their shift logs. Click any station to inspect its owner, model, and shift history.</p></div></div>
 
-        <div class="guide-item"><div class="guide-num">3</div><div><h3>Console vitals</h3><p>One honest line: how many runs the team has filed, what percentage ended green, average run time, and how the last one went. It's journaled in <code>reports/.metrics.jsonl</code> — nothing hidden, nothing averaged over.</p></div></div>
+        <div class="guide-item"><div class="guide-num">3</div><div><h3>Console vitals &amp; Git inspector</h3><p>Shows run metrics for the active project (plus global total) and a live <b>Git branch pill</b>. Click the Git pill to inspect modified files and recent commits in the target repository.</p></div></div>
 
-        <div class="guide-item"><div class="guide-num">4</div><div><h3>The crew — left column</h3><p>Each employee is a stamped badge: <b>code</b> (PM project manager, AR architect, BE backend, FE frontend, QA tester, RV reviewer, RP reporter, EX explainer), their duty, their free model, and a punched hole + barcode with their number. A circle beside the status means standby; orange means on shift. Click anyone to assign them work directly.</p></div></div>
+        <div class="guide-item"><div class="guide-num">4</div><div><h3>The crew — left column</h3><p>Each employee is a stamped badge: <b>code</b> (PM, AR, BE, FE, QA, RV, RP, EX), duty, assigned model, and project run statistics. Click anyone to route a task to them directly.</p></div></div>
 
-        <div class="guide-item"><div class="guide-num">5</div><div><h3>Who takes this task</h3><p>Dropdown in the Live wire header. <code>dispatcher — full pipeline</code> runs brief → plan → build → test → review → report by itself. Or pick one employee for focused work — e.g. <code>@qa</code> to just re-run the suite.</p></div></div>
+        <div class="guide-item"><div class="guide-num">5</div><div><h3>Templates &amp; task intake</h3><p>Click a template chip (Full Feature, Architecture Plan, Run &amp; Fix Tests, Security Review, Explain Codebase) to pre-fill structured instructions, or type your own brief and press <code>Ctrl/Cmd + Enter</code>.</p></div></div>
 
-        <div class="guide-item"><div class="guide-num">6</div><div><h3>Known projects &amp; New project…</h3><p>Type any folder path in <code>project folder</code> and hit <b>Register folder</b> — it joins the dropdown permanently. <b>New project…</b> scaffolds a git repo with team files (or adopts an existing folder, only adding what's missing). The HQ works in any directory on this PC.</p></div></div>
+        <div class="guide-item"><div class="guide-num">6</div><div><h3>Live wire filters &amp; scroll-lock</h3><p>Filter stream output by <b>All</b>, <b>Output</b>, <b>Thoughts</b>, <b>Tools</b>, or <b>Errors</b>. Scrolling up automatically pauses auto-scroll so you can read without jumping; click <b>↓ Resume auto-scroll</b> to follow the tail again.</p></div></div>
 
-        <div class="guide-item"><div class="guide-num">7</div><div><h3>Assign a task</h3><p>Type in the big field and hit <b>Assign task</b> (or <code>Ctrl/Cmd + Enter</code>). Be specific: what, where, acceptance criteria. The crew works from what you write — vague brief, mediocre work.</p></div></div>
+        <div class="guide-item"><div class="guide-num">7</div><div><h3>Detach vs. Stop run</h3><p><b>Detach</b> disconnects your viewer so you can browse finished run replays without interrupting the live process. <b>Stop run</b> terminates the running CLI process tree immediately.</p></div></div>
 
-        <div class="guide-item"><div class="guide-num">8</div><div><h3>The live wire</h3><p>Every dispatch streams here. Muted italics = system, <code>[tool] …</code> = a tool call, green <code>✓</code> = done, coral <code>✗</code> = failed, and a blinking ▌ when the wire is idle. Scroll is automatic.</p></div></div>
-
-        <div class="guide-item"><div class="guide-num">9</div><div><h3>Stop run</h3><p>Halts the current run at the next safe point. Two agents edit the same folder? Stop one — branches are cheap, corrupted merges aren't.</p></div></div>
-
-        <div class="guide-item"><div class="guide-num">10</div><div><h3>Filed reports &amp; the ledger</h3><p><code>@reporter</code> writes every finished task to <code>reports/</code>. Pick a slip on the right to read it in the ledger view — the sage <b>FILED</b> stamp means it made it to record. Reports never lie: skipped steps and waived findings must appear at the top.</p></div></div>
-
-        <div class="guide-item"><div class="guide-num">11</div><div><h3>Keyboard</h3><p><code>/</code> jump to the task field · <code>Ctrl/Cmd + Enter</code> assign · <code>?</code> open/close this guide · <code>Esc</code> close it. Standard Tab/Shift+Tab navigation everywhere; focus rings are terracotta.</p></div></div>
-
-        <div class="guide-item"><div class="guide-num">12</div><div><h3>Working agreement</h3><p>One task = one branch (<code>task/&lt;slug&gt;</code>) = one report · small commits · <b>you merge, always</b> · never paste secrets (free models may train on inputs) · reviewers block on CRITICAL findings · if blocked, the crew stops and tells you rather than shipping partials.</p></div></div>
+        <div class="guide-item"><div class="guide-num">8</div><div><h3>Rendered Markdown reports</h3><p>Filed reports in <code>reports/</code> render with formatted headings, tables, and code blocks. Use <b>Raw MD</b> to toggle raw source or <b>Copy</b> to copy the report to your clipboard.</p></div></div>
       </div>
 
       <footer class="guide-foot">
