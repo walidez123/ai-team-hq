@@ -1,4 +1,5 @@
 'use strict';
+const fs = require('fs');
 const { spawn, execFile } = require('child_process');
 const path = require('path');
 const { createLineSplitter, updateAgyConfigComment, updateOpencodeFrontmatter } = require('../ui/server.js');
@@ -99,6 +100,11 @@ async function main() {
   } catch (e) {
     fail('unit: frontmatter & agy config comment body safety', String(e));
   }
+
+  const memJsonPath = path.join(ROOT, '.ai-team', 'memory.json');
+  const memMdPath = path.join(ROOT, 'docs', 'PROJECT-MEMORY.md');
+  const hadMemJson = fs.existsSync(memJsonPath) ? fs.readFileSync(memJsonPath, 'utf8') : null;
+  const hadMemMd = fs.existsSync(memMdPath) ? fs.readFileSync(memMdPath, 'utf8') : null;
 
   const child = spawn('node', ['ui/server.js'], {
     cwd: ROOT,
@@ -285,7 +291,7 @@ async function main() {
       if (tRes.dur >= 300) warn(`concurrent /api/team took ${tRes.dur}ms (>=300ms) while settings in flight`);
     } catch (e) { fail('GET /api/agents/settings', String(e)); }
 
-    // l. preferences (routing, engine, timeout)
+    // l. preferences (routing, engine, timeout, phased mode, memory, quota failover)
     let originalPrefs = null;
     try {
       const { body: orig } = await fetchJson(BASE + '/api/preferences');
@@ -293,9 +299,22 @@ async function main() {
       const r1 = await fetch(BASE + '/api/preferences', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ modelRouting: 'dynamic', engine: 'agy', inactivityTimeoutMin: 15 }),
+        body: JSON.stringify({
+          modelRouting: 'dynamic',
+          engine: 'agy',
+          inactivityTimeoutMin: 15,
+          executionMode: 'phased',
+          phaseAdvance: 'manual',
+          projectMemory: true,
+          quotaAutoSwitch: true,
+          crossEngineFallback: true,
+          maxQuotaRetries: 4,
+        }),
       });
-      if (r1.status !== 200) throw new Error(`valid prefs status=${r1.status}`);
+      const b1 = await r1.json();
+      if (r1.status !== 200 || b1.executionMode !== 'phased' || b1.phaseAdvance !== 'manual' || b1.maxQuotaRetries !== 4) {
+        throw new Error(`valid prefs status=${r1.status} body=${JSON.stringify(b1)}`);
+      }
       const r2 = await fetch(BASE + '/api/preferences', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -305,12 +324,12 @@ async function main() {
       const r3 = await fetch(BASE + '/api/preferences', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ engine: 'invalid-engine' }),
+        body: JSON.stringify({ executionMode: 'invalid-mode' }),
       });
-      if (r3.status !== 400) throw new Error(`bogus engine status=${r3.status}`);
-      ok('POST /api/preferences (engine, routing, watchdog)');
+      if (r3.status !== 400) throw new Error(`bogus executionMode status=${r3.status}`);
+      ok('POST /api/preferences (engine, routing, phased, memory & quota failover)');
     } catch (e) {
-      fail('POST /api/preferences (engine, routing, watchdog)', String(e));
+      fail('POST /api/preferences (engine, routing, phased, memory & quota failover)', String(e));
     } finally {
       try {
         if (originalPrefs) {
@@ -319,6 +338,103 @@ async function main() {
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(originalPrefs),
           });
+        }
+      } catch { /* best effort */ }
+    }
+
+    // m. Project memory API (init, update, set-phase, clear) & quota failover helpers
+    try {
+      const {
+        isQuotaError,
+        markModelCooldown,
+        clearModelCooldowns,
+        getActiveCooldowns,
+        selectFallbackModel,
+        buildMemoryHandoffPrompt,
+      } = require('../ui/server.js');
+
+      if (!isQuotaError('Error: 429 Too Many Requests - quota exceeded for model')) {
+        throw new Error('isQuotaError failed to detect 429 quota message');
+      }
+      if (!isQuotaError('RESOURCE_EXHAUSTED: rate limit reached')) {
+        throw new Error('isQuotaError failed to detect RESOURCE_EXHAUSTED');
+      }
+      if (isQuotaError('Normal build output: 42 files compiled with 0 errors')) {
+        throw new Error('isQuotaError false-positived on normal output');
+      }
+
+      clearModelCooldowns();
+      markModelCooldown('agy', 'gemini-3.8-flash-high', 'test_quota', 60000);
+      const cds = getActiveCooldowns();
+      if (cds.length !== 1 || cds[0].model !== 'gemini-3.8-flash-high') {
+        throw new Error('cooldown tracking failed');
+      }
+      const fb = await selectFallbackModel('backend', 'agy', 'gemini-3.8-flash-high', { crossEngineFallback: true });
+      if (!fb || !fb.model || fb.model === 'gemini-3.8-flash-high') {
+        throw new Error(`fallback selection failed: ${JSON.stringify(fb)}`);
+      }
+      clearModelCooldowns();
+
+      // Test /api/memory lifecycle
+      const initRes = await fetchJson(BASE + '/api/memory', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'init', task: 'Build phased test feature', executionMode: 'phased' }),
+      });
+      if (initRes.res.status !== 200 || !initRes.body?.memory?.phases || initRes.body.memory.phases.length !== 5) {
+        throw new Error(`memory init failed: ${JSON.stringify(initRes.body)}`);
+      }
+
+      const updRes = await fetchJson(BASE + '/api/memory', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          action: 'update',
+          notes: 'Switch from opencode to agy after phase 1',
+          planSummary: 'Step 1: create API. Step 2: add UI.',
+        }),
+      });
+      if (updRes.res.status !== 200 || updRes.body?.memory?.notes !== 'Switch from opencode to agy after phase 1') {
+        throw new Error('memory update failed');
+      }
+
+      const phaseRes = await fetchJson(BASE + '/api/memory', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'set-phase', phaseIndex: 1 }),
+      });
+      if (phaseRes.res.status !== 200 || phaseRes.body?.memory?.currentPhaseIndex !== 1) {
+        throw new Error('memory set-phase failed');
+      }
+
+      const prompt = buildMemoryHandoffPrompt(phaseRes.body.memory, phaseRes.body.memory.phases[1], 'Build phased test feature');
+      if (!prompt.includes('Step 1: create API') || !prompt.includes('Switch from opencode to agy')) {
+        throw new Error('buildMemoryHandoffPrompt missing planSummary or notes');
+      }
+
+      const clrRes = await fetchJson(BASE + '/api/memory', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'clear' }),
+      });
+      if (clrRes.res.status !== 200 || clrRes.body?.memory !== null) {
+        throw new Error('memory clear failed');
+      }
+      ok('Project memory lifecycle & quota failover unit/API checks');
+    } catch (e) {
+      fail('Project memory lifecycle & quota failover unit/API checks', String(e));
+    } finally {
+      try {
+        if (hadMemJson !== null) {
+          fs.mkdirSync(path.dirname(memJsonPath), { recursive: true });
+          fs.writeFileSync(memJsonPath, hadMemJson, 'utf8');
+        } else if (fs.existsSync(memJsonPath)) {
+          fs.unlinkSync(memJsonPath);
+        }
+        if (hadMemMd !== null) {
+          fs.writeFileSync(memMdPath, hadMemMd, 'utf8');
+        } else if (fs.existsSync(memMdPath)) {
+          fs.unlinkSync(memMdPath);
         }
       } catch { /* best effort */ }
     }

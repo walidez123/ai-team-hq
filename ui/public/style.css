@@ -766,3 +766,204 @@ textarea::placeholder, input::placeholder { color: var(--faint); }
 .badges::-webkit-scrollbar-thumb, .wire-log::-webkit-scrollbar-thumb, .slips::-webkit-scrollbar-thumb, .ledger pre::-webkit-scrollbar-thumb, .ledger-rendered::-webkit-scrollbar-thumb, .guide-panel::-webkit-scrollbar-thumb {
   background: var(--panel-5); border-radius: 5px;
 }
+
+/* ============ phased project memory & quota failover ============ */
+.memory-bar {
+  background: var(--panel-2);
+  border: 1px solid var(--hairline-strong);
+  border-left: 3px solid var(--rust);
+  border-radius: var(--r-sm);
+  padding: 8px 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.memory-bar[hidden] { display: none; }
+.memory-bar-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.memory-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+}
+.memory-badge {
+  font: 600 9.5px/1 var(--font-mono);
+  letter-spacing: .08em;
+  padding: 4px 7px;
+  border-radius: 4px;
+  background: rgba(232, 89, 12, .16);
+  color: var(--rust-bright);
+  border: 1px solid rgba(232, 89, 12, .35);
+  white-space: nowrap;
+}
+.memory-badge.live {
+  background: rgba(232, 89, 12, .24);
+  color: #ffb085;
+}
+.memory-badge.done {
+  background: rgba(39, 106, 75, .22);
+  color: var(--ok);
+  border-color: rgba(39, 106, 75, .45);
+}
+.memory-task {
+  font: 500 12px/1.3 var(--font-ui);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 440px;
+}
+.memory-engine-note {
+  font: 400 10px/1.2 var(--font-mono);
+  color: var(--faint);
+}
+.memory-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.memory-phases {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.phase-pill {
+  font: 500 10px/1.2 var(--font-mono);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--hairline-strong);
+  background: var(--panel-3);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.phase-pill:hover {
+  border-color: var(--rust);
+  color: var(--text);
+}
+.phase-pill.done {
+  border-color: rgba(86, 194, 136, .45);
+  background: rgba(39, 106, 75, .18);
+  color: var(--ok);
+}
+.phase-pill.running, .phase-pill.current {
+  border-color: var(--rust);
+  background: rgba(232, 89, 12, .2);
+  color: var(--rust-bright);
+  font-weight: 600;
+}
+.phase-pill.failed {
+  border-color: rgba(229, 107, 95, .5);
+  background: rgba(179, 64, 42, .2);
+  color: var(--error);
+}
+
+.ln-failover {
+  color: #ffb366;
+  background: rgba(232, 89, 12, .14);
+  border-left: 3px solid var(--rust);
+  padding: 4px 8px;
+  margin: 3px 0;
+  border-radius: 3px;
+  font-weight: 500;
+}
+
+.settings-foot {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.pref-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.pref-foot-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  border-top: 1px solid var(--hairline);
+}
+
+.memory-modal-panel {
+  width: min(820px, 100%);
+}
+.memory-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.memory-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.memory-field label {
+  font: 500 10.5px/1.2 var(--font-mono);
+  color: var(--muted);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.memory-field input,
+.memory-field textarea {
+  background: var(--panel-2);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-sm);
+  color: var(--text);
+  font: 400 12px/1.5 var(--font-mono);
+  padding: 8px 10px;
+  resize: vertical;
+}
+.memory-field input:focus,
+.memory-field textarea:focus {
+  outline: none;
+  border-color: var(--rust);
+}
+.memory-modal-phases {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  max-height: 210px;
+  overflow-y: auto;
+}
+.mem-phase-row {
+  background: var(--panel-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.mem-phase-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mem-phase-model {
+  font: 400 10.5px/1.2 var(--font-mono);
+  color: var(--faint);
+  flex: 1;
+}
+.mem-phase-summary {
+  font: 400 11.5px/1.45 var(--font-ui);
+  color: var(--muted);
+  border-top: 1px dashed var(--hairline);
+  padding-top: 5px;
+}

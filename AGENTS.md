@@ -41,6 +41,13 @@ The HQ dashboard reads these files (project root, or `?dir=`) and renders them a
 7. **Reporter** writes `reports/YYYY-MM-DD-HHMM-<slug>.md` using `docs/report-template.md`.
 8. **Principal** reviews and merges. Humans always own the merge button.
 
+## Phased execution, project memory & quota failover
+
+To avoid exhausting model quota in a single monolithic run, the HQ server supports **Phased Execution** (`executionMode: "phased"`):
+- Tasks run through 5 checkpointed phases (`Plan` → `Build` → `Test` → `Review` → `Report`), each in a fresh CLI invocation.
+- State is persisted in `.ai-team/memory.json` and mirrored to `docs/PROJECT-MEMORY.md`. If `docs/PROJECT-MEMORY.md` exists in the project root, read it for context from earlier phases or other models/engines (`opencode` ↔ `agy`).
+- When **Quota Auto-Switch** is enabled (`quotaAutoSwitch: true`), hitting a model quota or `429` rate limit automatically places that model on cooldown, switches the employee to the next available fallback model (or cross-engine fallback), and continues the current phase from memory.
+
 ## Where I work
 
 The team is installed globally as an Antigravity plugin (`C:\Users\waled\.gemini\config\plugins\ai-team`) and in `.agents/agents` (plus `.opencode/agents` for legacy compatibility), so this constitution applies in **every project folder on this PC**, not just the HQ. Each project has its own `AGENTS.md` (created from the HQ template) with project-specific notes; the global agents + skills work regardless. Reports are filed inside the current project's own `reports/` folder. The HQ registry (`projects.json`) lists the picked projects — it is a convenience index, not a sandbox. Projects may live at any absolute path.

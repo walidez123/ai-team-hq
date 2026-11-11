@@ -146,11 +146,356 @@ function prefsPayload() {
   const modelRouting = p.modelRouting === 'dynamic' ? 'dynamic' : 'static';
   const timeout = Number(p.inactivityTimeoutMin);
   const inactivityTimeoutMin = Number.isFinite(timeout) && timeout >= 1 && timeout <= 120 ? timeout : 10;
-  return { engine, modelRouting, inactivityTimeoutMin };
+  const executionMode = p.executionMode === 'single' ? 'single' : 'phased';
+  const phaseAdvance = p.phaseAdvance === 'manual' ? 'manual' : 'auto';
+  const projectMemory = p.projectMemory === false ? false : true;
+  const quotaAutoSwitch = p.quotaAutoSwitch === false ? false : true;
+  const crossEngineFallback = p.crossEngineFallback === false ? false : true;
+  const retries = Number(p.maxQuotaRetries);
+  const maxQuotaRetries = Number.isFinite(retries) && retries >= 1 && retries <= 10 ? Math.round(retries) : 3;
+  return {
+    engine,
+    modelRouting,
+    inactivityTimeoutMin,
+    executionMode,
+    phaseAdvance,
+    projectMemory,
+    quotaAutoSwitch,
+    crossEngineFallback,
+    maxQuotaRetries,
+    cooldowns: getActiveCooldowns(),
+  };
 }
 
 function activeEngine() {
-  return prefsPayload().engine;
+  return readPrefs().engine === 'opencode' ? 'opencode' : 'agy';
+}
+
+// ---------- quota detection & model cooldown management ----------
+const modelCooldowns = new Map(); // key: "${engine}:${model}" -> { engine, model, until, reason }
+
+const QUOTA_REGEX = /(?:RESOURCE_EXHAUSTED|quota\s+(?:exceeded|exhausted|limit|reached)|out\s+of\s+quota|insufficient_quota|exceeded\s+your\s+current\s+quota|rate[_\s-]limit(?:\s+exceeded|\s+reached)?|too\s+many\s+requests|\b(?:http|status|statusCode|code|error)[:\s=]+429\b|\b429\s+Too\s+Many\s+Requests\b|credit\s+balance\s+is\s+too\s+low|billing\s+hard\s+limit|model[_\s-]cooldown|capacity\s+exhausted|no\s+capacity\s+available|usage\s+limit\s+(?:exceeded|reached))/i;
+
+function isQuotaError(text) {
+  if (typeof text !== 'string' || !text) return false;
+  if (text.length > 2400) return false;
+  return QUOTA_REGEX.test(text);
+}
+
+function markModelCooldown(engine, model, reason = 'quota_exhausted', durationMs = 15 * 60 * 1000) {
+  if (!engine || !model) return;
+  const key = `${engine}:${model}`;
+  modelCooldowns.set(key, {
+    engine,
+    model,
+    reason: String(reason || 'quota_exhausted').slice(0, 160),
+    until: Date.now() + durationMs,
+  });
+}
+
+function isModelOnCooldown(engine, model) {
+  const key = `${engine}:${model}`;
+  const entry = modelCooldowns.get(key);
+  if (!entry) return false;
+  if (entry.until <= Date.now()) {
+    modelCooldowns.delete(key);
+    return false;
+  }
+  return true;
+}
+
+function getActiveCooldowns() {
+  const now = Date.now();
+  const active = [];
+  for (const [k, v] of modelCooldowns.entries()) {
+    if (v.until <= now) modelCooldowns.delete(k);
+    else active.push({ ...v, remainingSec: Math.max(1, Math.round((v.until - now) / 1000)) });
+  }
+  return active;
+}
+
+function clearModelCooldowns() {
+  modelCooldowns.clear();
+}
+
+async function selectFallbackModel(agentId, currentEngine, currentModel, prefs) {
+  const baseId = String(agentId || 'dispatcher').replace(/-deep$/, '');
+  const tryEngine = async (eng, excludeModel) => {
+    const catalog = await getModelCatalog(eng);
+    const ordered = [];
+    if (eng === 'agy') {
+      const pref = PREFERRED_AGY[baseId];
+      if (pref && catalog.includes(pref)) ordered.push(pref);
+      for (const m of catalog) {
+        if (!ordered.includes(m)) ordered.push(m);
+      }
+    } else {
+      const pref = PREFERRED_OPENCODE_FREE[baseId];
+      if (pref && catalog.includes(pref)) ordered.push(pref);
+      for (const m of catalog.filter(x => /-free$/i.test(x))) {
+        if (!ordered.includes(m)) ordered.push(m);
+      }
+      for (const m of catalog) {
+        if (!ordered.includes(m)) ordered.push(m);
+      }
+    }
+    for (const candidate of ordered) {
+      if (candidate === excludeModel) continue;
+      if (!isModelOnCooldown(eng, candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  };
+
+  const sameEnginePick = await tryEngine(currentEngine, currentModel);
+  if (sameEnginePick) {
+    return { engine: currentEngine, model: sameEnginePick, crossEngine: false };
+  }
+  if (prefs && prefs.crossEngineFallback) {
+    const altEngine = currentEngine === 'agy' ? 'opencode' : 'agy';
+    const altPick = await tryEngine(altEngine, null);
+    if (altPick) {
+      return { engine: altEngine, model: altPick, crossEngine: true };
+    }
+  }
+  return null;
+}
+
+// ---------- persistent project memory & phased pipeline ----------
+const PIPELINE_PHASES = [
+  {
+    id: 'plan',
+    label: 'Plan',
+    stage: 'plan',
+    agent: 'architect',
+    instructions: 'Phase 1 (PLAN): Analyze the repository and produce a concise, actionable implementation plan (Goal, Acceptance criteria, Files to create/modify, Design notes, Risks, Test strategy). Do NOT modify application code in this phase. Append your 1-line shift log to journal/architect.jsonl.',
+  },
+  {
+    id: 'build',
+    label: 'Build',
+    stage: 'build',
+    agent: 'backend',
+    instructions: 'Phase 2 (BUILD): Implement all planned changes from Phase 1 in small, clean commits. Handle both backend and frontend files called for by the plan, and verify build/syntax. Append your 1-line shift log to journal/backend.jsonl (or journal/frontend.jsonl).',
+  },
+  {
+    id: 'test',
+    label: 'Test',
+    stage: 'test',
+    agent: 'qa',
+    instructions: 'Phase 3 (TEST): Run the project test suite, add or update tests covering the new changes from Phase 2, and fix or report any failures. Append your 1-line shift log to journal/qa.jsonl.',
+  },
+  {
+    id: 'review',
+    label: 'Review',
+    stage: 'review',
+    agent: 'reviewer',
+    instructions: 'Phase 4 (REVIEW): Perform a read-only code review of the current branch diff (correctness, security, performance, maintainability) and output your verdict. Append your 1-line shift log to journal/reviewer.jsonl.',
+  },
+  {
+    id: 'report',
+    label: 'Report',
+    stage: 'report',
+    agent: 'reporter',
+    instructions: 'Phase 5 (REPORT): File the final stakeholder report in reports/YYYY-MM-DD-HHMM-<slug>.md using docs/report-template.md summarizing what shipped, test results, and review verdict. Append your 1-line shift log to journal/reporter.jsonl.',
+  },
+];
+
+function resolveProjectDir(targetDir) {
+  if (targetDir && typeof targetDir === 'string' && targetDir.trim()) {
+    const resolved = path.resolve(targetDir.trim());
+    if (path.isAbsolute(resolved) && isDir(resolved)) return resolved;
+  }
+  return ROOT;
+}
+
+function memoryFilePath(targetDir) {
+  return path.join(resolveProjectDir(targetDir), '.ai-team', 'memory.json');
+}
+
+function memoryMarkdownPath(targetDir) {
+  return path.join(resolveProjectDir(targetDir), 'docs', 'PROJECT-MEMORY.md');
+}
+
+function readProjectMemory(targetDir) {
+  const file = memoryFilePath(targetDir);
+  try {
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+      if (data && typeof data === 'object') return data;
+    }
+  } catch { /* ignore */ }
+  return null;
+}
+
+function syncMemoryMarkdown(targetDir, mem) {
+  if (!mem || !mem.originalTask) return;
+  try {
+    const mdPath = memoryMarkdownPath(targetDir);
+    fs.mkdirSync(path.dirname(mdPath), { recursive: true });
+    const lines = [
+      '# AI Team — Project Memory & Phase Handoff',
+      '',
+      `- **Task:** ${mem.originalTask}`,
+      `- **Status:** ${mem.status || 'idle'} (${mem.executionMode || 'phased'})`,
+      `- **Updated:** ${mem.updatedAt || new Date().toISOString()}`,
+      `- **Last Engine / Model:** ${mem.lastEngine || '—'} · ${mem.lastModel || '—'}`,
+      `- **Git Branch:** ${mem.gitBranch || '—'}`,
+      '',
+    ];
+    if (mem.notes) {
+      lines.push('## Principal Notes', '', mem.notes, '');
+    }
+    if (mem.planSummary) {
+      lines.push('## Architectural Plan Summary', '', mem.planSummary, '');
+    }
+    if (Array.isArray(mem.phases) && mem.phases.length) {
+      lines.push('## Pipeline Phases', '');
+      mem.phases.forEach((p, idx) => {
+        const icon = p.status === 'done' ? '✓' : p.status === 'running' ? '●' : p.status === 'failed' ? '✗' : '○';
+        lines.push(`### ${idx + 1}. ${icon} ${p.label} (@${p.agent}) — \`${p.status}\``);
+        if (p.engine || p.model) lines.push(`- **Executed on:** ${p.engine || '—'} / \`${p.model || '—'}\``);
+        if (p.summary) lines.push(`- **Handoff Summary:** ${p.summary}`);
+        lines.push('');
+      });
+    }
+    if (Array.isArray(mem.changedFiles) && mem.changedFiles.length) {
+      lines.push('## Modified Files in Working Tree', '');
+      for (const f of mem.changedFiles.slice(0, 25)) lines.push(`- \`${f}\``);
+      lines.push('');
+    }
+    if (Array.isArray(mem.recentCommits) && mem.recentCommits.length) {
+      lines.push('## Recent Commits', '');
+      for (const c of mem.recentCommits.slice(0, 8)) lines.push(`- \`${c}\``);
+      lines.push('');
+    }
+    if (Array.isArray(mem.failovers) && mem.failovers.length) {
+      lines.push('## Automatic Quota Failovers', '');
+      for (const fo of mem.failovers) {
+        lines.push(`- ${fo.ts}: @${fo.agent} switched from \`${fo.fromEngine}:${fo.fromModel}\` → \`${fo.toEngine}:${fo.toModel}\` (attempt ${fo.attempt})`);
+      }
+      lines.push('');
+    }
+    fs.writeFileSync(mdPath, lines.join('\n'), 'utf8');
+  } catch { /* best effort */ }
+}
+
+function writeProjectMemory(targetDir, mem) {
+  const dir = resolveProjectDir(targetDir);
+  const file = memoryFilePath(dir);
+  const updated = { ...mem, updatedAt: new Date().toISOString() };
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(updated, null, 2), 'utf8');
+    syncMemoryMarkdown(dir, updated);
+  } catch { /* best effort */ }
+  return updated;
+}
+
+function clearProjectMemory(targetDir) {
+  const dir = resolveProjectDir(targetDir);
+  try {
+    const file = memoryFilePath(dir);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+  } catch { /* ignore */ }
+}
+
+function pickBuildAgentForTask(task) {
+  const t = String(task || '').toLowerCase();
+  const uiSignals = /\b(ui|ux|css|html|style|styling|button|modal|layout|frontend|theme|color|font|responsive|accessibility|aria)\b/.test(t);
+  const beSignals = /\b(api|endpoint|server|database|sql|schema|auth|cli|backend|process|stream|socket|cron|worker)\b/.test(t);
+  if (uiSignals && !beSignals) return 'frontend';
+  return 'backend';
+}
+
+function initProjectMemory(targetDir, task, executionMode = 'phased', assignedAgent = 'dispatcher') {
+  const existing = readProjectMemory(targetDir);
+  const now = new Date().toISOString();
+  const buildAgent = pickBuildAgentForTask(task);
+  const phases = PIPELINE_PHASES.map(p => ({
+    id: p.id,
+    label: p.label,
+    stage: p.stage,
+    agent: p.id === 'build' ? buildAgent : p.agent,
+    instructions: p.instructions,
+    status: 'pending',
+    startedAt: null,
+    endedAt: null,
+    engine: null,
+    model: null,
+    summary: '',
+  }));
+  const mem = {
+    taskId: `mem-${Date.now()}`,
+    originalTask: task,
+    assignedAgent,
+    executionMode,
+    status: 'running',
+    createdAt: now,
+    updatedAt: now,
+    currentPhaseIndex: 0,
+    lastEngine: activeEngine(),
+    lastModel: null,
+    gitBranch: existing?.gitBranch || 'main',
+    changedFiles: existing?.changedFiles || [],
+    recentCommits: existing?.recentCommits || [],
+    planSummary: '',
+    lastSummary: '',
+    notes: existing?.notes || '',
+    phases: executionMode === 'phased' ? phases : [],
+    failovers: [],
+  };
+  return writeProjectMemory(targetDir, mem);
+}
+
+function buildMemoryHandoffPrompt(memory, phase, fallbackTask) {
+  const rawTask = (memory && memory.originalTask) || fallbackTask || '';
+  if (!memory) return rawTask;
+
+  const parts = [
+    '[AI TEAM PROJECT MEMORY & CONTINUATION BRIEF]',
+    `Original Task: ${rawTask}`,
+  ];
+  if (phase) {
+    const idx = Array.isArray(memory.phases) ? memory.phases.findIndex(p => p.id === phase.id) : 0;
+    parts.push(`Current Pipeline Phase: Phase ${idx + 1}/${memory.phases.length || 5} — ${phase.label.toUpperCase()} (assigned to @${phase.agent})`);
+  }
+  if (memory.gitBranch) {
+    parts.push(`Git Branch: ${memory.gitBranch}`);
+  }
+  if (Array.isArray(memory.changedFiles) && memory.changedFiles.length) {
+    parts.push(`Modified Files in Working Tree: ${memory.changedFiles.slice(0, 20).join(', ')}`);
+  }
+  if (Array.isArray(memory.recentCommits) && memory.recentCommits.length) {
+    parts.push(`Recent Git Commits: ${memory.recentCommits.slice(0, 5).join(' | ')}`);
+  }
+  if (memory.notes && memory.notes.trim()) {
+    parts.push(`\n--- Principal Notes ---\n${memory.notes.trim()}`);
+  }
+  if (memory.planSummary && memory.planSummary.trim() && (!phase || phase.id !== 'plan')) {
+    parts.push(`\n--- Architectural Plan (from Phase 1) ---\n${memory.planSummary.trim()}`);
+  }
+  if (Array.isArray(memory.phases) && memory.phases.length) {
+    const completed = memory.phases.filter(p => p.status === 'done' && p.summary);
+    if (completed.length) {
+      parts.push('\n--- Completed Phases ---');
+      for (const cp of completed) {
+        parts.push(`- [${cp.label}] (@${cp.agent} via ${cp.engine || 'cli'}/${cp.model || 'model'}): ${cp.summary}`);
+      }
+    }
+  } else if (memory.lastSummary) {
+    parts.push(`\n--- Previous Run Progress ---\n${memory.lastSummary}`);
+  }
+
+  if (phase) {
+    parts.push(`\n--- YOUR ASSIGNMENT FOR THIS PHASE (${phase.label.toUpperCase()}) ---`);
+    parts.push(phase.instructions);
+    parts.push('Continue seamlessly from the repository state and memory above. You may also inspect docs/PROJECT-MEMORY.md if needed.');
+  } else {
+    parts.push('\n--- CONTINUATION INSTRUCTIONS ---');
+    parts.push('Continue and complete the Original Task from the current repository state above without redoing work that is already committed.');
+  }
+  return parts.join('\n');
 }
 
 // ---------- safe line-buffered stream splitter ----------
@@ -243,7 +588,7 @@ function snapshotJournalCounts(cwd) {
   return counts;
 }
 
-function startRun({ task, agent, dir }) {
+function startRun({ task, agent, dir, resume = false, startPhaseIndex = null }) {
   const id = `run-${Date.now()}-${++runCounter}`;
   const cwd = dir && dir.trim() ? path.resolve(dir.trim()) : ROOT;
   if (!fs.existsSync(cwd) || !fs.statSync(cwd).isDirectory()) {
@@ -251,79 +596,101 @@ function startRun({ task, agent, dir }) {
   }
 
   const prefs = prefsPayload();
+  const existingMem = readProjectMemory(cwd);
+  if (resume && (!existingMem || !existingMem.originalTask)) {
+    throw new Error('No saved task in project memory for this folder — dispatch a task first.');
+  }
+
+  const effectiveTask = resume ? existingMem.originalTask : task;
+  const effectiveAgent = resume ? (existingMem.assignedAgent || agent || 'dispatcher') : (agent || 'dispatcher');
+  const baseAgentId = String(effectiveAgent).replace(/-deep$/, '');
+  const isPhased = resume
+    ? (existingMem.executionMode === 'phased' && Array.isArray(existingMem.phases) && existingMem.phases.length > 0)
+    : (baseAgentId === 'dispatcher' && prefs.executionMode === 'phased');
+
+  let memory = null;
+  if (resume) {
+    memory = { ...existingMem, status: 'running' };
+    if (isPhased) {
+      let idx = typeof startPhaseIndex === 'number' ? startPhaseIndex : (memory.currentPhaseIndex || 0);
+      if (idx < 0 || idx >= memory.phases.length) {
+        const firstIncomplete = memory.phases.findIndex(p => p.status !== 'done');
+        idx = firstIncomplete >= 0 ? firstIncomplete : 0;
+      }
+      memory.currentPhaseIndex = idx;
+      if (memory.phases[idx]) {
+        memory.phases[idx].status = 'pending';
+      }
+    }
+    memory = writeProjectMemory(cwd, memory);
+  } else if (prefs.projectMemory) {
+    memory = initProjectMemory(cwd, effectiveTask, isPhased ? 'phased' : 'single', effectiveAgent);
+  }
+
   const engine = prefs.engine;
-  const baseAgentId = String(agent || 'dispatcher').replace(/-deep$/, '');
-  const meta = getEffectiveAgentMeta(agent || 'dispatcher');
+  const meta = getEffectiveAgentMeta(effectiveAgent);
 
   const initialStages = { intake: 'lit', plan: 'idle', build: 'idle', test: 'idle', review: 'idle', report: 'idle' };
-  if (baseAgentId !== 'dispatcher' && AGENT_TO_STAGE[baseAgentId]) {
+  if (isPhased && memory && Array.isArray(memory.phases)) {
+    initialStages.intake = 'done';
+    for (let i = 0; i < memory.phases.length; i++) {
+      const p = memory.phases[i];
+      if (i < memory.currentPhaseIndex || p.status === 'done') initialStages[p.stage] = 'done';
+      else if (i === memory.currentPhaseIndex) initialStages[p.stage] = 'lit';
+    }
+  } else if (baseAgentId !== 'dispatcher' && AGENT_TO_STAGE[baseAgentId]) {
     initialStages.intake = 'done';
     initialStages[AGENT_TO_STAGE[baseAgentId]] = 'lit';
   }
 
   const run = {
-    id, task, agent: agent || 'dispatcher', dir: cwd, engine,
+    id,
+    task: effectiveTask,
+    agent: effectiveAgent,
+    dir: cwd,
+    engine,
     model: meta.model || null,
-    startedAt: new Date().toISOString(), endedAt: null,
-    status: 'running', exitCode: null, error: null,
-    stopRequested: false, timedOut: false,
+    isPhased,
+    phaseIndex: isPhased && memory ? (memory.currentPhaseIndex || 0) : 0,
+    pauseRequested: false,
+    retryCount: 0,
+    startedAt: new Date().toISOString(),
+    endedAt: null,
+    status: 'running',
+    exitCode: null,
+    error: null,
+    stopRequested: false,
+    timedOut: false,
     stages: initialStages,
-    events: [], clients: new Set(), child: null,
-    watchdog: null, journalTimer: null,
+    events: [],
+    clients: new Set(),
+    child: null,
+    watchdog: null,
+    journalTimer: null,
   };
 
-  let bin;
-  let args;
-  if (engine === 'agy') {
-    bin = AGY_BIN;
-    args = [
-      '--print',
-      '--output-format', 'stream-json',
-      '--dangerously-skip-permissions',
-      '--mode', 'auto',
-      '--agent', run.agent,
-    ];
-    if (meta.model && !meta.model.startsWith('opencode/')) {
-      args.push('--model', meta.model);
-    }
-    if (meta.effort && ['low', 'medium', 'high', 'xhigh', 'max'].includes(meta.effort)) {
-      args.push('--effort', meta.effort);
-    }
-    args.push(task);
-  } else {
-    bin = OPENCODE_BIN;
-    args = ['run', '--standalone', '--format', 'json', '--auto', '--agent', run.agent, '--title', `hq:${id}`, task];
-  }
-
-  const child = spawn(bin, args, {
-    cwd,
-    windowsHide: true,
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
-  run.child = child;
-  if (child.stdin) child.stdin.end();
-
   // Inactivity watchdog
-  const timeoutMs = (prefs.inactivityTimeoutMin || 10) * 60 * 1000;
   const resetWatchdog = () => {
     if (run.watchdog) clearTimeout(run.watchdog);
     if (run.status !== 'running') return;
+    const curPrefs = prefsPayload();
+    const timeoutMs = (curPrefs.inactivityTimeoutMin || 10) * 60 * 1000;
     run.watchdog = setTimeout(() => {
       if (run.status === 'running') {
         run.timedOut = true;
         pushEvent(run, {
           kind: 'raw',
           stream: 'stderr',
-          text: `⏱ Run timed out after ${prefs.inactivityTimeoutMin}m of inactivity — halting process.`,
+          text: `⏱ Run timed out after ${curPrefs.inactivityTimeoutMin}m of inactivity — halting process.`,
         });
         stopRun(run);
       }
     }, timeoutMs);
   };
-  resetWatchdog();
 
   // Poll journal directory every 2s during active run to detect real stage completions
   const knownJournals = snapshotJournalCounts(cwd);
+  const latestJournalByAgent = {};
   run.journalTimer = setInterval(() => {
     const journalDir = path.join(cwd, 'journal');
     if (!fs.existsSync(journalDir)) return;
@@ -339,10 +706,11 @@ function startRun({ task, agent, dir }) {
           let parsedEntry = null;
           try { parsedEntry = JSON.parse(latestRaw); } catch { /* ignore */ }
           const st = AGENT_TO_STAGE[slot.id];
-          if (st) {
+          if (st && !run.isPhased) {
             setRunStage(run, st, parsedEntry && parsedEntry.status === 'failed' ? 'failed' : 'done', slot.id);
           }
           if (parsedEntry) {
+            latestJournalByAgent[slot.id] = parsedEntry;
             pushEvent(run, { kind: 'journal', agent: slot.id, entry: parsedEntry });
           }
         }
@@ -350,61 +718,26 @@ function startRun({ task, agent, dir }) {
     }
   }, 2000);
 
-  const handleParsedLine = (trimmed, stream) => {
-    resetWatchdog();
-    let ev;
-    try {
-      const parsed = JSON.parse(trimmed);
-      ev = { kind: 'json', stream, event: parsed };
-      detectStageTransitionFromEvent(run, parsed, trimmed);
-    } catch {
-      ev = { kind: 'raw', stream, text: trimmed };
-      detectStageTransitionFromEvent(run, null, trimmed);
-    }
-    pushEvent(run, ev);
-  };
-
-  const stdoutSplitter = createLineSplitter(line => handleParsedLine(line, 'stdout'));
-  const stderrSplitter = createLineSplitter(line => handleParsedLine(line, 'stderr'));
-
-  child.stdout.on('data', d => stdoutSplitter.write(d));
-  child.stderr.on('data', d => stderrSplitter.write(d));
-
-  let finalized = false;
-  const finalize = (code, signal, spawnErr) => {
-    if (finalized) return;
-    finalized = true;
-    stdoutSplitter.end();
-    stderrSplitter.end();
+  let runFinalized = false;
+  const finalizeRun = (finalStatus, code, signal, errText) => {
+    if (runFinalized) return;
+    runFinalized = true;
     if (run.watchdog) { clearTimeout(run.watchdog); run.watchdog = null; }
     if (run.journalTimer) { clearInterval(run.journalTimer); run.journalTimer = null; }
 
     run.endedAt = new Date().toISOString();
     run.exitCode = typeof code === 'number' ? code : null;
-    if (run.stopRequested && !run.timedOut) {
-      run.status = 'stopped';
-    } else if (run.timedOut) {
-      run.status = 'error';
-      run.error = `Timed out after ${prefs.inactivityTimeoutMin}m of inactivity`;
-    } else if (spawnErr) {
-      run.status = 'error';
-      run.error = String(spawnErr.message || spawnErr);
-    } else if (code === 0) {
-      run.status = 'done';
-    } else if (signal) {
-      run.status = 'stopped';
-    } else {
-      run.status = 'error';
-      run.error = `Process exited with code ${code}`;
-    }
+    run.status = finalStatus;
+    if (errText) run.error = errText;
 
-    // Update final stages state
     for (const k of Object.keys(run.stages)) {
       if (run.stages[k] === 'lit') {
-        run.stages[k] = run.status === 'done' ? 'done' : (run.status === 'stopped' ? 'done' : 'failed');
+        if (finalStatus === 'done') run.stages[k] = 'done';
+        else if (finalStatus === 'paused' || finalStatus === 'stopped') run.stages[k] = 'idle';
+        else run.stages[k] = 'failed';
       }
     }
-    if (run.status === 'done' && baseAgentId === 'dispatcher') {
+    if (finalStatus === 'done' && baseAgentId === 'dispatcher') {
       for (const k of Object.keys(run.stages)) run.stages[k] = 'done';
     }
 
@@ -418,11 +751,16 @@ function startRun({ task, agent, dir }) {
     });
 
     appendMetric({
-      id: run.id, agent: run.agent, dir: run.dir, engine: run.engine,
+      id: run.id,
+      agent: run.agent,
+      dir: run.dir,
+      engine: run.engine,
       task: String(run.task || '').slice(0, 500),
-      startedAt: run.startedAt, endedAt: run.endedAt,
+      startedAt: run.startedAt,
+      endedAt: run.endedAt,
       durationMs: Math.max(0, new Date(run.endedAt) - new Date(run.startedAt)),
-      status: run.status, exitCode: run.exitCode,
+      status: run.status === 'paused' ? 'done' : run.status,
+      exitCode: run.exitCode,
       signal: run.status === 'stopped' ? (signal || null) : undefined,
       eventCount: run.events.length,
     });
@@ -431,8 +769,357 @@ function startRun({ task, agent, dir }) {
     run.clients.clear();
   };
 
-  child.on('error', (err) => finalize(null, null, err));
-  child.on('close', (code, signal) => finalize(code, signal, null));
+  const launchStep = () => {
+    if (runFinalized || run.stopRequested) {
+      finalizeRun('stopped', null, null, null);
+      return;
+    }
+
+    const curPrefs = prefsPayload();
+    if (memory) {
+      const diskMem = readProjectMemory(cwd);
+      if (diskMem && diskMem.taskId === memory.taskId) memory = diskMem;
+    }
+
+    let currentPhase = null;
+    let stepAgent = run.agent;
+    if (run.isPhased && memory && Array.isArray(memory.phases)) {
+      currentPhase = memory.phases[run.phaseIndex];
+      if (!currentPhase) {
+        memory.status = 'completed';
+        writeProjectMemory(cwd, memory);
+        finalizeRun('done', 0, null, null);
+        return;
+      }
+      stepAgent = currentPhase.agent || 'backend';
+      // Dynamic routing upgrade on hard tasks
+      if (
+        curPrefs.modelRouting === 'dynamic' &&
+        ['architect', 'backend', 'frontend', 'qa', 'reviewer'].includes(stepAgent) &&
+        (run.task.length > 220 || /\b(architecture|security|refactor|migrate|multi-module|concurrency|auth|failover)\b/i.test(run.task))
+      ) {
+        const deepCandidate = `${stepAgent}-deep`;
+        if (knownAgentIds().has(deepCandidate)) stepAgent = deepCandidate;
+      }
+    }
+
+    const baseStepAgent = String(stepAgent).replace(/-deep$/, '');
+    const stepEngine = curPrefs.engine;
+    const stepMeta = getEffectiveAgentMeta(stepAgent);
+    const stepModel = stepMeta.model || null;
+    run.engine = stepEngine;
+    run.model = stepModel;
+
+    if (currentPhase) {
+      run.stages.intake = 'done';
+      setRunStage(run, currentPhase.stage, 'lit', baseStepAgent);
+      currentPhase.status = 'running';
+      currentPhase.startedAt = new Date().toISOString();
+      currentPhase.engine = stepEngine;
+      currentPhase.model = stepModel;
+      memory.currentPhaseIndex = run.phaseIndex;
+      memory.status = 'running';
+      memory.lastEngine = stepEngine;
+      memory.lastModel = stepModel;
+      memory = writeProjectMemory(cwd, memory);
+      pushEvent(run, {
+        kind: 'phase',
+        phase: currentPhase.id,
+        label: currentPhase.label,
+        index: run.phaseIndex,
+        total: memory.phases.length,
+        status: 'running',
+        agent: stepAgent,
+        engine: stepEngine,
+        model: stepModel,
+        memory,
+      });
+    } else if (memory) {
+      memory.lastEngine = stepEngine;
+      memory.lastModel = stepModel;
+      memory.status = 'running';
+      memory = writeProjectMemory(cwd, memory);
+    }
+
+    const stepPrompt = (curPrefs.projectMemory && memory && (run.isPhased || resume || run.retryCount > 0 || memory.notes))
+      ? buildMemoryHandoffPrompt(memory, currentPhase, run.task)
+      : run.task;
+
+    let bin;
+    let args;
+    if (stepEngine === 'agy') {
+      bin = AGY_BIN;
+      args = [
+        '--print',
+        '--output-format', 'stream-json',
+        '--dangerously-skip-permissions',
+        '--mode', 'auto',
+        '--agent', stepAgent,
+      ];
+      if (stepModel && !stepModel.startsWith('opencode/')) {
+        args.push('--model', stepModel);
+      }
+      if (stepMeta.effort && ['low', 'medium', 'high', 'xhigh', 'max'].includes(stepMeta.effort)) {
+        args.push('--effort', stepMeta.effort);
+      }
+      args.push(stepPrompt);
+    } else {
+      bin = OPENCODE_BIN;
+      args = ['run', '--standalone', '--format', 'json', '--auto', '--agent', stepAgent, '--title', `hq:${id}`, stepPrompt];
+    }
+
+    const stepAssistantTexts = [];
+    const stepRecentLines = [];
+    let stepQuotaDetected = false;
+    let stepQuotaReason = '';
+    delete latestJournalByAgent[baseStepAgent];
+
+    const recordRecentLine = (txt) => {
+      if (!txt) return;
+      stepRecentLines.push(String(txt).slice(0, 600));
+      if (stepRecentLines.length > 20) stepRecentLines.shift();
+    };
+
+    const handleParsedLine = (trimmed, stream) => {
+      resetWatchdog();
+      recordRecentLine(trimmed);
+      if (stream === 'stderr' && isQuotaError(trimmed)) {
+        stepQuotaDetected = true;
+        stepQuotaReason = trimmed;
+      }
+      let ev;
+      try {
+        const parsed = JSON.parse(trimmed);
+        ev = { kind: 'json', stream, event: parsed };
+        const evType = String(parsed.event ?? parsed.type ?? parsed.kind ?? '').toLowerCase();
+        if ((evType === 'error' || parsed.error) && isQuotaError(trimmed)) {
+          stepQuotaDetected = true;
+          stepQuotaReason = trimmed;
+        }
+        const txt = parsed?.part?.text ?? parsed?.output ?? parsed?.text ?? parsed?.message ?? parsed?.content ?? null;
+        if (typeof txt === 'string' && txt.trim()) {
+          stepAssistantTexts.push(txt.trim());
+          recordRecentLine(txt.trim());
+        }
+        if (!run.isPhased) detectStageTransitionFromEvent(run, parsed, trimmed);
+      } catch {
+        ev = { kind: 'raw', stream, text: trimmed };
+        if (!run.isPhased) detectStageTransitionFromEvent(run, null, trimmed);
+      }
+      pushEvent(run, ev);
+    };
+
+    const stdoutSplitter = createLineSplitter(line => handleParsedLine(line, 'stdout'));
+    const stderrSplitter = createLineSplitter(line => handleParsedLine(line, 'stderr'));
+
+    let child;
+    try {
+      child = spawn(bin, args, {
+        cwd,
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (spawnErr) {
+      finalizeRun('error', null, null, String(spawnErr.message || spawnErr));
+      return;
+    }
+
+    run.child = child;
+    if (child.stdin) child.stdin.end();
+    resetWatchdog();
+
+    child.stdout.on('data', d => stdoutSplitter.write(d));
+    child.stderr.on('data', d => stderrSplitter.write(d));
+
+    let stepClosed = false;
+    const onStepClose = async (code, signal, spawnErr) => {
+      if (stepClosed || runFinalized) return;
+      stepClosed = true;
+      stdoutSplitter.end();
+      stderrSplitter.end();
+
+      const gitInfo = await getGitStatus(cwd);
+      const journalEntry = latestJournalByAgent[baseStepAgent];
+      const rawAssistant = stepAssistantTexts.join('\n').trim();
+      const stepSummary = (journalEntry && journalEntry.summary)
+        ? journalEntry.summary
+        : (rawAssistant ? rawAssistant.slice(-600) : '');
+      const stepFullPlan = rawAssistant ? rawAssistant.slice(-3500) : stepSummary;
+
+      if (run.stopRequested && !run.timedOut) {
+        if (memory) {
+          memory.status = 'paused';
+          memory.gitBranch = gitInfo.branch || memory.gitBranch;
+          memory.changedFiles = (gitInfo.changedFiles || []).map(f => f.file);
+          memory.recentCommits = (gitInfo.commits || []).map(c => `${c.hash} ${c.subject}`);
+          if (currentPhase && currentPhase.status === 'running') {
+            currentPhase.status = 'pending';
+            if (stepSummary) currentPhase.summary = stepSummary;
+          }
+          memory = writeProjectMemory(cwd, memory);
+        }
+        finalizeRun('stopped', code, signal, null);
+        return;
+      }
+
+      const latestPrefs = prefsPayload();
+      const hitQuota = stepQuotaDetected || (code !== 0 && stepRecentLines.some(l => isQuotaError(l)));
+
+      // Automatic Quota Failover & Continuation
+      if (hitQuota && latestPrefs.quotaAutoSwitch && run.retryCount < latestPrefs.maxQuotaRetries && !run.stopRequested) {
+        run.retryCount += 1;
+        markModelCooldown(stepEngine, stepModel, stepQuotaReason || 'quota_exhausted');
+        const fb = await selectFallbackModel(baseStepAgent, stepEngine, stepModel, latestPrefs);
+        if (fb) {
+          if (fb.crossEngine) {
+            writePrefs({ ...readPrefs(), engine: fb.engine });
+          }
+          try { await setAgentModel(baseStepAgent, fb.model); } catch { /* best effort */ }
+          if (memory) {
+            memory.gitBranch = gitInfo.branch || memory.gitBranch;
+            memory.changedFiles = (gitInfo.changedFiles || []).map(f => f.file);
+            memory.recentCommits = (gitInfo.commits || []).map(c => `${c.hash} ${c.subject}`);
+            if (stepSummary) memory.lastSummary = stepSummary;
+            memory.failovers = memory.failovers || [];
+            memory.failovers.push({
+              ts: new Date().toISOString(),
+              agent: baseStepAgent,
+              phase: currentPhase ? currentPhase.id : null,
+              fromEngine: stepEngine,
+              fromModel: stepModel,
+              toEngine: fb.engine,
+              toModel: fb.model,
+              attempt: run.retryCount,
+            });
+            memory = writeProjectMemory(cwd, memory);
+          }
+          pushEvent(run, {
+            kind: 'failover',
+            agent: baseStepAgent,
+            phase: currentPhase ? currentPhase.id : null,
+            fromEngine: stepEngine,
+            fromModel: stepModel,
+            toEngine: fb.engine,
+            toModel: fb.model,
+            crossEngine: fb.crossEngine,
+            attempt: run.retryCount,
+            maxRetries: latestPrefs.maxQuotaRetries,
+          });
+          launchStep();
+          return;
+        }
+      }
+
+      // Step succeeded
+      if (code === 0 && !hitQuota && !spawnErr && !run.timedOut) {
+        run.retryCount = 0;
+        if (run.isPhased && memory && currentPhase) {
+          currentPhase.status = 'done';
+          currentPhase.endedAt = new Date().toISOString();
+          currentPhase.summary = stepSummary || `Completed ${currentPhase.label} phase.`;
+          if (currentPhase.id === 'plan' && stepFullPlan) {
+            memory.planSummary = stepFullPlan;
+          }
+          memory.gitBranch = gitInfo.branch || memory.gitBranch;
+          memory.changedFiles = (gitInfo.changedFiles || []).map(f => f.file);
+          memory.recentCommits = (gitInfo.commits || []).map(c => `${c.hash} ${c.subject}`);
+          setRunStage(run, currentPhase.stage, 'done', baseStepAgent);
+
+          run.phaseIndex += 1;
+          memory.currentPhaseIndex = run.phaseIndex;
+
+          if (run.phaseIndex < memory.phases.length) {
+            const nextPhase = memory.phases[run.phaseIndex];
+            if (latestPrefs.phaseAdvance === 'manual' || run.pauseRequested) {
+              memory.status = 'paused';
+              memory = writeProjectMemory(cwd, memory);
+              pushEvent(run, {
+                kind: 'phase',
+                phase: currentPhase.id,
+                label: currentPhase.label,
+                status: 'paused',
+                nextPhase: nextPhase.id,
+                nextLabel: nextPhase.label,
+                memory,
+              });
+              finalizeRun('paused', 0, null, null);
+              return;
+            }
+            memory.status = 'running';
+            memory = writeProjectMemory(cwd, memory);
+            pushEvent(run, {
+              kind: 'phase',
+              phase: currentPhase.id,
+              label: currentPhase.label,
+              status: 'done',
+              nextPhase: nextPhase.id,
+              nextLabel: nextPhase.label,
+              memory,
+            });
+            launchStep();
+            return;
+          }
+
+          // All phases complete
+          memory.status = 'completed';
+          memory = writeProjectMemory(cwd, memory);
+          pushEvent(run, {
+            kind: 'phase',
+            phase: currentPhase.id,
+            label: currentPhase.label,
+            status: 'done',
+            memory,
+          });
+          finalizeRun('done', 0, null, null);
+          return;
+        }
+
+        // Single-run mode succeeded
+        if (memory) {
+          memory.status = 'completed';
+          memory.lastSummary = stepSummary || 'Completed run.';
+          memory.gitBranch = gitInfo.branch || memory.gitBranch;
+          memory.changedFiles = (gitInfo.changedFiles || []).map(f => f.file);
+          memory.recentCommits = (gitInfo.commits || []).map(c => `${c.hash} ${c.subject}`);
+          memory = writeProjectMemory(cwd, memory);
+        }
+        finalizeRun('done', 0, null, null);
+        return;
+      }
+
+      // Step failed and could not recover
+      const errMsg = run.timedOut
+        ? `Timed out after ${latestPrefs.inactivityTimeoutMin}m of inactivity`
+        : spawnErr
+          ? String(spawnErr.message || spawnErr)
+          : hitQuota
+            ? `Quota exhausted on ${stepEngine}:${stepModel} (retries exhausted)`
+            : signal
+              ? `Terminated by signal ${signal}`
+              : `Process exited with code ${code}`;
+
+      if (memory) {
+        memory.status = 'paused';
+        if (stepSummary) memory.lastSummary = stepSummary;
+        memory.gitBranch = gitInfo.branch || memory.gitBranch;
+        memory.changedFiles = (gitInfo.changedFiles || []).map(f => f.file);
+        memory.recentCommits = (gitInfo.commits || []).map(c => `${c.hash} ${c.subject}`);
+        if (currentPhase) {
+          currentPhase.status = 'failed';
+          currentPhase.endedAt = new Date().toISOString();
+          currentPhase.summary = stepSummary || errMsg;
+        }
+        memory = writeProjectMemory(cwd, memory);
+        if (currentPhase) {
+          pushEvent(run, { kind: 'phase', phase: currentPhase.id, label: currentPhase.label, status: 'failed', error: errMsg, memory });
+        }
+      }
+      finalizeRun(signal && !run.timedOut ? 'stopped' : 'error', code, signal, errMsg);
+    };
+
+    child.on('error', (err) => onStepClose(null, null, err));
+    child.on('close', (code, signal) => onStepClose(code, signal, null));
+  };
 
   runs.set(id, run);
   try {
@@ -449,12 +1136,26 @@ function startRun({ task, agent, dir }) {
     }
     if (victim) runs.delete(victim);
   }
+
+  pushEvent(run, {
+    kind: 'status',
+    status: 'running',
+    agent: run.agent,
+    engine: run.engine,
+    model: run.model,
+    dir: run.dir,
+    isPhased: run.isPhased,
+    stages: { ...run.stages },
+  });
+
+  launchStep();
   return run;
 }
 
 function stopRun(run) {
-  if (!run || run.status !== 'running' || !run.child || !run.child.pid) return false;
+  if (!run || run.status !== 'running') return false;
   run.stopRequested = true;
+  if (!run.child || !run.child.pid) return true;
   if (process.platform === 'win32') {
     execFile('taskkill', ['/pid', String(run.child.pid), '/T', '/F'], { windowsHide: true }, (err) => {
       if (err) { try { run.child.kill(); } catch { /* best effort */ } }
@@ -1174,11 +1875,33 @@ const server = http.createServer(async (req, res) => {
       }
       try {
         const run = startRun({ task, agent, dir: body.dir });
-        pushEvent(run, { kind: 'status', status: 'running', agent, engine: run.engine, model: run.model, dir: run.dir, stages: { ...run.stages } });
-        return sendJson(res, 200, { id: run.id, engine: run.engine, stages: run.stages });
+        return sendJson(res, 200, { id: run.id, engine: run.engine, isPhased: run.isPhased, stages: run.stages });
       } catch (e) {
         return sendJson(res, 400, { error: e.message });
       }
+    }
+    if (pathname === '/api/run/continue' && req.method === 'POST') {
+      const body = await readJson(req);
+      try {
+        const phaseIndex = typeof body.phaseIndex === 'number' ? body.phaseIndex : null;
+        const run = startRun({ dir: body.dir, resume: true, startPhaseIndex: phaseIndex });
+        return sendJson(res, 200, { id: run.id, engine: run.engine, isPhased: run.isPhased, stages: run.stages });
+      } catch (e) {
+        return sendJson(res, 400, { error: e.message });
+      }
+    }
+    if (pathname.startsWith('/api/runs/') && pathname.endsWith('/pause') && req.method === 'POST') {
+      const id = pathname.slice('/api/runs/'.length, -'/pause'.length);
+      const run = runs.get(id);
+      if (!run) return sendJson(res, 404, { error: 'unknown run' });
+      if (run.status !== 'running') return sendJson(res, 409, { error: 'run already finished' });
+      run.pauseRequested = true;
+      pushEvent(run, {
+        kind: 'raw',
+        stream: 'stdout',
+        text: '⏸ Pause requested — run will pause cleanly as soon as the current phase completes.',
+      });
+      return sendJson(res, 200, { ok: true, pauseRequested: true });
     }
     if (pathname.startsWith('/api/runs/') && pathname.endsWith('/stop') && req.method === 'POST') {
       const id = pathname.slice('/api/runs/'.length, -'/stop'.length);
@@ -1188,7 +1911,60 @@ const server = http.createServer(async (req, res) => {
       stopRun(run);
       return sendJson(res, 200, { ok: true });
     }
-    // ---- team preferences (engine, modelRouting, inactivityTimeoutMin) ----
+    // ---- project memory & phase handoff ----
+    if (pathname === '/api/memory' && req.method === 'GET') {
+      const dir = url.searchParams.get('dir');
+      return sendJson(res, 200, {
+        dir: resolveProjectDir(dir),
+        memory: readProjectMemory(dir),
+        cooldowns: getActiveCooldowns(),
+      });
+    }
+    if (pathname === '/api/memory' && req.method === 'POST') {
+      const body = await readJson(req);
+      const dir = body.dir;
+      const action = String(body.action || 'update').toLowerCase();
+      if (action === 'clear') {
+        clearProjectMemory(dir);
+        return sendJson(res, 200, { ok: true, memory: null });
+      }
+      if (action === 'clear-cooldowns') {
+        clearModelCooldowns();
+        return sendJson(res, 200, { ok: true, cooldowns: [] });
+      }
+      if (action === 'init') {
+        const task = String(body.task || '').trim();
+        if (!task) return sendJson(res, 400, { error: 'task is required to initialize memory' });
+        const mem = initProjectMemory(dir, task, body.executionMode === 'single' ? 'single' : 'phased', body.agent || 'dispatcher');
+        return sendJson(res, 200, { ok: true, memory: mem });
+      }
+      let mem = readProjectMemory(dir);
+      if (!mem) {
+        if (!body.task) return sendJson(res, 404, { error: 'No project memory exists yet for this folder' });
+        mem = initProjectMemory(dir, String(body.task).trim(), 'phased', 'dispatcher');
+      }
+      if (action === 'set-phase') {
+        const idx = Number(body.phaseIndex);
+        if (!Array.isArray(mem.phases) || !Number.isInteger(idx) || idx < 0 || idx >= mem.phases.length) {
+          return sendJson(res, 400, { error: 'invalid phaseIndex' });
+        }
+        mem.currentPhaseIndex = idx;
+        mem.status = 'paused';
+        for (let i = idx; i < mem.phases.length; i++) {
+          mem.phases[i].status = 'pending';
+        }
+        mem = writeProjectMemory(dir, mem);
+        return sendJson(res, 200, { ok: true, memory: mem });
+      }
+      if (body.notes !== undefined) mem.notes = String(body.notes || '');
+      if (body.planSummary !== undefined) mem.planSummary = String(body.planSummary || '');
+      if (body.originalTask !== undefined && String(body.originalTask).trim()) {
+        mem.originalTask = String(body.originalTask).trim();
+      }
+      mem = writeProjectMemory(dir, mem);
+      return sendJson(res, 200, { ok: true, memory: mem });
+    }
+    // ---- team preferences (engine, modelRouting, inactivityTimeoutMin, phased & quota settings) ----
     if (pathname === '/api/preferences' && req.method === 'GET') return sendJson(res, 200, prefsPayload());
     if (pathname === '/api/preferences' && req.method === 'POST') {
       const body = await readJson(req);
@@ -1207,6 +1983,33 @@ const server = http.createServer(async (req, res) => {
         const t = Number(body.inactivityTimeoutMin);
         if (!Number.isFinite(t) || t < 1 || t > 120) return sendJson(res, 400, { error: 'inactivityTimeoutMin must be between 1 and 120' });
         current.inactivityTimeoutMin = Math.round(t);
+      }
+      if (body.executionMode !== undefined) {
+        const mode = String(body.executionMode || '').toLowerCase();
+        if (!['phased', 'single'].includes(mode)) return sendJson(res, 400, { error: "executionMode must be 'phased' or 'single'" });
+        current.executionMode = mode;
+      }
+      if (body.phaseAdvance !== undefined) {
+        const adv = String(body.phaseAdvance || '').toLowerCase();
+        if (!['auto', 'manual'].includes(adv)) return sendJson(res, 400, { error: "phaseAdvance must be 'auto' or 'manual'" });
+        current.phaseAdvance = adv;
+      }
+      if (body.projectMemory !== undefined) {
+        current.projectMemory = Boolean(body.projectMemory);
+      }
+      if (body.quotaAutoSwitch !== undefined) {
+        current.quotaAutoSwitch = Boolean(body.quotaAutoSwitch);
+      }
+      if (body.crossEngineFallback !== undefined) {
+        current.crossEngineFallback = Boolean(body.crossEngineFallback);
+      }
+      if (body.maxQuotaRetries !== undefined) {
+        const r = Number(body.maxQuotaRetries);
+        if (!Number.isFinite(r) || r < 1 || r > 10) return sendJson(res, 400, { error: 'maxQuotaRetries must be between 1 and 10' });
+        current.maxQuotaRetries = Math.round(r);
+      }
+      if (body.clearCooldowns) {
+        clearModelCooldowns();
       }
       writePrefs(current);
       return sendJson(res, 200, prefsPayload());
@@ -1284,4 +2087,19 @@ if (require.main === module) {
   });
 }
 
-module.exports = { server, createLineSplitter, updateAgyConfigComment, updateOpencodeFrontmatter };
+module.exports = {
+  server,
+  createLineSplitter,
+  updateAgyConfigComment,
+  updateOpencodeFrontmatter,
+  isQuotaError,
+  markModelCooldown,
+  clearModelCooldowns,
+  getActiveCooldowns,
+  selectFallbackModel,
+  buildMemoryHandoffPrompt,
+  initProjectMemory,
+  readProjectMemory,
+  writeProjectMemory,
+  clearProjectMemory,
+};

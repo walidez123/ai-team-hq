@@ -603,10 +603,17 @@ async function openReport(name) {
 }
 
 /* ---------- dispatch + stream ---------- */
+const pausePhaseBtn = $('#pausePhaseBtn');
+
 function closeStream() {
   if (state.es) { state.es.close(); state.es = null; }
   stopBtn.disabled = true;
   if (detachBtn) detachBtn.hidden = true;
+  if (pausePhaseBtn) {
+    pausePhaseBtn.hidden = true;
+    pausePhaseBtn.disabled = false;
+    pausePhaseBtn.textContent = '⏸ Pause phase';
+  }
 }
 
 function detachCurrentRun() {
@@ -622,6 +629,17 @@ function detachCurrentRun() {
 
 if (detachBtn) {
   detachBtn.addEventListener('click', detachCurrentRun);
+}
+
+if (pausePhaseBtn) {
+  pausePhaseBtn.addEventListener('click', async () => {
+    if (!state.currentRunId) return;
+    pausePhaseBtn.disabled = true;
+    pausePhaseBtn.textContent = '⏸ Pausing after phase…';
+    try {
+      await fetch(`/api/runs/${encodeURIComponent(state.currentRunId)}/pause`, { method: 'POST' });
+    } catch { /* ignore */ }
+  });
 }
 
 function renderJsonEvent(ev) {
@@ -668,6 +686,38 @@ function handleEvent(ev) {
     return;
   }
 
+  if (ev.kind === 'phase') {
+    if (ev.memory) {
+      state.memory = ev.memory;
+      renderMemoryBar(ev.memory);
+    }
+    const shortModel = String(ev.model || '').replace(/^opencode\//, '');
+    if (ev.status === 'running') {
+      logLine(`◈ Phase ${(ev.index ?? 0) + 1}/${ev.total || 5} [${ev.label}] started — @${ev.agent} on ${ev.engine || 'cli'}/${shortModel}`, 'ln-stage', ts);
+    } else if (ev.status === 'done') {
+      logLine(`✓ Phase [${ev.label}] completed & saved to project memory${ev.nextLabel ? ' → advancing to ' + ev.nextLabel : ''}`, 'ln-done', ts);
+    } else if (ev.status === 'paused') {
+      logLine(`⏸ Phase [${ev.label}] completed & checkpointed. Paused before [${ev.nextLabel || 'next phase'}] — you may switch models/engines and click ▶ Resume / Next Phase.`, 'ln-stage', ts);
+    } else if (ev.status === 'failed') {
+      logLine(`✗ Phase [${ev.label}] failed (${ev.error || 'error'}) — state saved in memory. Switch models/engines and click ▶ Resume to continue.`, 'ln-err', ts);
+    }
+    return;
+  }
+
+  if (ev.kind === 'failover') {
+    const fromM = String(ev.fromModel || '').replace(/^opencode\//, '');
+    const toM = String(ev.toModel || '').replace(/^opencode\//, '');
+    logLine(
+      `⚡ Quota limit hit on ${ev.fromEngine}/${fromM} — auto-switched @${ev.agent} to ${ev.toEngine}/${toM} and continuing task (attempt ${ev.attempt}/${ev.maxRetries})…`,
+      'ln-failover',
+      ts
+    );
+    fetchTeam();
+    loadPreferences();
+    fetchMemory();
+    return;
+  }
+
   if (ev.kind === 'journal') {
     const e = ev.entry || {};
     logLine(`📋 shift log [${ev.agent}]: ${e.summary || e.status || 'done'}`, 'ln-done', ts);
@@ -678,15 +728,19 @@ function handleEvent(ev) {
   if (ev.kind === 'status') {
     if (ev.stages) applyRailStages(ev.stages);
     if (ev.status === 'running') {
+      if (pausePhaseBtn) pausePhaseBtn.hidden = !ev.isPhased;
       const eng = ev.engine ? ` [${ev.engine}]` : '';
-      return logLine(`run started${eng}${ev.dir ? ' in ' + ev.dir : ''}`, 'ln-sys', ts);
+      return logLine(`run started${eng}${ev.isPhased ? ' (phased memory pipeline)' : ''}${ev.dir ? ' in ' + ev.dir : ''}`, 'ln-sys', ts);
     }
     logEl.classList.remove('running');
     if (ev.status === 'done') {
       logLine('✓ run finished', 'ln-done', ts);
       railFinish(true, { stages: ev.stages });
+    } else if (ev.status === 'paused') {
+      logLine('⏸ phase complete — run paused with memory saved. Click ▶ Resume / Next Phase to continue.', 'ln-stage', ts);
+      railFinish(true, { interrupted: true, stages: ev.stages });
     } else if (ev.status === 'stopped') {
-      logLine('■ run stopped', 'ln-err', ts);
+      logLine('■ run stopped (progress saved in project memory)', 'ln-err', ts);
       railFinish(false, { interrupted: true, stages: ev.stages });
     } else {
       logLine(`✗ run ${ev.status} (${ev.error || ('exit ' + (ev.exitCode ?? '?'))})`, 'ln-err', ts);
@@ -923,7 +977,211 @@ function refreshProjectContext() {
   fetchReports();
   fetchMetrics();
   fetchGitStatus();
+  fetchMemory();
   if (shiftsOn) fetchJournal();
+}
+
+/* ---------- phased project memory & continuation ---------- */
+const memoryBar = $('#memoryBar');
+const memoryStatusBadge = $('#memoryStatusBadge');
+const memoryTaskLabel = $('#memoryTaskLabel');
+const memoryEngineLabel = $('#memoryEngineLabel');
+const memoryPhasePills = $('#memoryPhasePills');
+const resumePhaseBtn = $('#resumePhaseBtn');
+const openMemoryBtn = $('#openMemoryBtn');
+const resetMemoryBtn = $('#resetMemoryBtn');
+const memoryOverlay = $('#memoryOverlay');
+
+async function fetchMemory() {
+  try {
+    const dir = selectedDir();
+    const r = await fetch('/api/memory' + (dir ? '?dir=' + encodeURIComponent(dir) : ''));
+    const data = await r.json();
+    state.memory = data.memory || null;
+    renderMemoryBar(state.memory);
+  } catch { /* ignore */ }
+}
+
+function renderMemoryBar(mem) {
+  if (!memoryBar) return;
+  if (!mem || !mem.originalTask) {
+    memoryBar.hidden = true;
+    return;
+  }
+  memoryBar.hidden = false;
+  const phases = Array.isArray(mem.phases) ? mem.phases : [];
+  const curIdx = typeof mem.currentPhaseIndex === 'number' ? mem.currentPhaseIndex : 0;
+  const curPhase = phases[curIdx] || phases[phases.length - 1] || null;
+  const st = (mem.status || 'paused').toLowerCase();
+
+  if (memoryStatusBadge) {
+    if (st === 'running') {
+      memoryStatusBadge.textContent = curPhase ? `RUNNING · PHASE ${curIdx + 1}/${phases.length} (${curPhase.label.toUpperCase()})` : 'RUNNING';
+      memoryStatusBadge.className = 'memory-badge live';
+    } else if (st === 'completed') {
+      memoryStatusBadge.textContent = 'COMPLETED · MEMORY SAVED';
+      memoryStatusBadge.className = 'memory-badge done';
+    } else {
+      memoryStatusBadge.textContent = curPhase ? `PAUSED · NEXT: ${curPhase.label.toUpperCase()} (${curIdx + 1}/${phases.length})` : 'PAUSED · RESUMABLE';
+      memoryStatusBadge.className = 'memory-badge paused';
+    }
+  }
+
+  if (memoryTaskLabel) {
+    memoryTaskLabel.textContent = mem.originalTask;
+  }
+  if (memoryEngineLabel) {
+    const shortM = String(mem.lastModel || '').replace(/^opencode\//, '');
+    const failCount = Array.isArray(mem.failovers) && mem.failovers.length ? ` · ⚡ ${mem.failovers.length} failover${mem.failovers.length === 1 ? '' : 's'}` : '';
+    memoryEngineLabel.textContent = mem.lastEngine ? `last: ${mem.lastEngine}${shortM ? ' / ' + shortM : ''}${failCount}` : '';
+  }
+
+  if (resumePhaseBtn) {
+    resumePhaseBtn.disabled = Boolean(state.currentRunId);
+    if (st === 'completed') {
+      resumePhaseBtn.textContent = '▶ Re-run Pipeline';
+    } else if (curPhase) {
+      resumePhaseBtn.textContent = `▶ Continue: ${curPhase.label}`;
+    } else {
+      resumePhaseBtn.textContent = '▶ Resume Task';
+    }
+  }
+
+  if (memoryPhasePills) {
+    memoryPhasePills.innerHTML = '';
+    phases.forEach((p, idx) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const pStatus = p.status || 'pending';
+      const isCurrent = idx === curIdx && st !== 'completed';
+      btn.className = `phase-pill ${pStatus}${isCurrent ? ' current' : ''}`;
+      const icon = pStatus === 'done' ? '✓' : pStatus === 'running' ? '●' : pStatus === 'failed' ? '✗' : `${idx + 1}`;
+      const usedModel = p.model ? ` (${p.engine || ''}/${String(p.model).replace(/^opencode\//, '')})` : '';
+      btn.textContent = `${icon} ${p.label} · @${p.agent}`;
+      btn.title = `${p.label} (@${p.agent})${usedModel}${p.summary ? '\nSummary: ' + p.summary : ''}\nClick to resume from this phase`;
+      btn.addEventListener('click', () => {
+        if (state.currentRunId) return logLine('stop or wait for the current run before jumping to another phase', 'ln-err');
+        continueFromMemory(idx);
+      });
+      memoryPhasePills.appendChild(btn);
+    });
+  }
+}
+
+async function continueFromMemory(phaseIndex = null) {
+  if (state.currentRunId) return logLine('a run is already attached — click Detach or Stop run first', 'ln-err');
+  const dir = selectedDir();
+  clearEmptyState();
+  logLine(`resuming project task from memory${typeof phaseIndex === 'number' ? ` (phase ${phaseIndex + 1})` : ''} using active engine [${state.engine}]…`, 'ln-stage');
+  setAssignState('sending');
+  try {
+    const body = { dir };
+    if (typeof phaseIndex === 'number') body.phaseIndex = phaseIndex;
+    const r = await fetch('/api/run/continue', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      logLine(`could not resume: ${data.error || 'unknown error'}`, 'ln-err');
+      setAssignState('idle');
+      return;
+    }
+    railReset('dispatcher');
+    if (data.stages) applyRailStages(data.stages);
+    watchRun(data.id);
+    setAssignState('live');
+    fetchMemory();
+  } catch (e) {
+    logLine(`could not resume: ${e.message}`, 'ln-err');
+    setAssignState('idle');
+  }
+}
+
+async function resetProjectMemory() {
+  const dir = selectedDir();
+  if (!confirm('Clear the saved project memory & phase checkpoints for this folder?')) return;
+  try {
+    await fetch('/api/memory', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dir, action: 'clear' }),
+    });
+    state.memory = null;
+    renderMemoryBar(null);
+    logLine('cleared project memory for current folder', 'ln-sys');
+  } catch { /* ignore */ }
+}
+
+function openMemoryModal() {
+  if (!memoryOverlay) return;
+  const mem = state.memory;
+  if (!mem) return;
+  $('#memoryTaskEdit').value = mem.originalTask || '';
+  $('#memoryNotesEdit').value = mem.notes || '';
+  $('#memoryPlanEdit').value = mem.planSummary || '';
+  const metaNote = $('#memoryMetaNote');
+  if (metaNote) {
+    metaNote.textContent = `Branch: ${mem.gitBranch || '—'} · Updated: ${mem.updatedAt ? new Date(mem.updatedAt).toLocaleString() : '—'}`;
+  }
+  const list = $('#memoryModalPhases');
+  if (list) {
+    list.innerHTML = '';
+    const phases = Array.isArray(mem.phases) ? mem.phases : [];
+    phases.forEach((p, idx) => {
+      const row = el('div', 'mem-phase-row');
+      const head = el('div', 'mem-phase-head');
+      const badge = el('span', `phase-pill ${p.status || 'pending'}`, `${idx + 1}. ${p.label} (@${p.agent}) — ${p.status || 'pending'}`);
+      const modelInfo = el('span', 'mem-phase-model', p.model ? `${p.engine || 'cli'} / ${String(p.model).replace(/^opencode\//, '')}` : 'not run yet');
+      const runHere = el('button', 'btn btn-quiet btn-tiny', '▶ Resume here');
+      runHere.type = 'button';
+      runHere.disabled = Boolean(state.currentRunId);
+      runHere.addEventListener('click', () => {
+        memoryOverlay.hidden = true;
+        continueFromMemory(idx);
+      });
+      head.append(badge, modelInfo, runHere);
+      row.appendChild(head);
+      if (p.summary) {
+        row.appendChild(el('div', 'mem-phase-summary', p.summary));
+      }
+      list.appendChild(row);
+    });
+  }
+  memoryOverlay.hidden = false;
+  $('#closeMemoryModal').focus();
+}
+
+async function saveMemoryEdits() {
+  const dir = selectedDir();
+  const originalTask = $('#memoryTaskEdit').value.trim();
+  const notes = $('#memoryNotesEdit').value;
+  const planSummary = $('#memoryPlanEdit').value;
+  try {
+    const r = await fetch('/api/memory', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ dir, action: 'update', originalTask, notes, planSummary }),
+    });
+    const data = await r.json();
+    if (r.ok && data.memory) {
+      state.memory = data.memory;
+      renderMemoryBar(state.memory);
+      logLine('saved updated project memory & handoff notes to .ai-team/memory.json and docs/PROJECT-MEMORY.md', 'ln-done');
+      memoryOverlay.hidden = true;
+    }
+  } catch { /* ignore */ }
+}
+
+if (resumePhaseBtn) resumePhaseBtn.addEventListener('click', () => continueFromMemory(null));
+if (openMemoryBtn) openMemoryBtn.addEventListener('click', openMemoryModal);
+if (resetMemoryBtn) resetMemoryBtn.addEventListener('click', resetProjectMemory);
+if ($('#closeMemoryModal')) $('#closeMemoryModal').addEventListener('click', () => { memoryOverlay.hidden = true; });
+if ($('#closeMemoryDoneBtn')) $('#closeMemoryDoneBtn').addEventListener('click', () => { memoryOverlay.hidden = true; });
+if ($('#saveMemoryBtn')) $('#saveMemoryBtn').addEventListener('click', saveMemoryEdits);
+if (memoryOverlay) {
+  memoryOverlay.addEventListener('click', (e) => { if (e.target.hasAttribute('data-memory-close')) memoryOverlay.hidden = true; });
 }
 
 $('#refreshReports').addEventListener('click', fetchReports);
@@ -1277,12 +1535,24 @@ async function distributeFree() {
 }
 distributeFreeBtn.addEventListener('click', distributeFree);
 
-/* ---------- preferences (engine, routing, watchdog) ---------- */
+/* ---------- preferences (engine, routing, watchdog, phased memory & quota failover) ---------- */
 const routingStaticBtn = $('#routingStatic');
 const routingDynamicBtn = $('#routingDynamic');
 const engineAgyBtn = $('#engineAgy');
 const engineOpencodeBtn = $('#engineOpencode');
 const timeoutInput = $('#timeoutInput');
+const modePhasedBtn = $('#modePhased');
+const modeSingleBtn = $('#modeSingle');
+const advanceAutoBtn = $('#advanceAuto');
+const advanceManualBtn = $('#advanceManual');
+const memoryOnBtn = $('#memoryOn');
+const memoryOffBtn = $('#memoryOff');
+const quotaSwitchOnBtn = $('#quotaSwitchOn');
+const quotaSwitchOffBtn = $('#quotaSwitchOff');
+const crossEngineOnBtn = $('#crossEngineOn');
+const crossEngineOffBtn = $('#crossEngineOff');
+const maxRetriesInput = $('#maxRetriesInput');
+const clearCooldownsBtn = $('#clearCooldownsBtn');
 
 function setPrefsUI(p) {
   if (!p) return;
@@ -1294,6 +1564,35 @@ function setPrefsUI(p) {
   }
   if (timeoutInput && p.inactivityTimeoutMin) {
     timeoutInput.value = String(p.inactivityTimeoutMin);
+  }
+  if (modePhasedBtn && modeSingleBtn) {
+    modePhasedBtn.setAttribute('aria-pressed', String(p.executionMode !== 'single'));
+    modeSingleBtn.setAttribute('aria-pressed', String(p.executionMode === 'single'));
+  }
+  if (advanceAutoBtn && advanceManualBtn) {
+    advanceAutoBtn.setAttribute('aria-pressed', String(p.phaseAdvance !== 'manual'));
+    advanceManualBtn.setAttribute('aria-pressed', String(p.phaseAdvance === 'manual'));
+  }
+  if (memoryOnBtn && memoryOffBtn) {
+    memoryOnBtn.setAttribute('aria-pressed', String(p.projectMemory !== false));
+    memoryOffBtn.setAttribute('aria-pressed', String(p.projectMemory === false));
+  }
+  if (quotaSwitchOnBtn && quotaSwitchOffBtn) {
+    quotaSwitchOnBtn.setAttribute('aria-pressed', String(p.quotaAutoSwitch !== false));
+    quotaSwitchOffBtn.setAttribute('aria-pressed', String(p.quotaAutoSwitch === false));
+  }
+  if (crossEngineOnBtn && crossEngineOffBtn) {
+    crossEngineOnBtn.setAttribute('aria-pressed', String(p.crossEngineFallback !== false));
+    crossEngineOffBtn.setAttribute('aria-pressed', String(p.crossEngineFallback === false));
+  }
+  if (maxRetriesInput && p.maxQuotaRetries) {
+    maxRetriesInput.value = String(p.maxQuotaRetries);
+  }
+  if (clearCooldownsBtn) {
+    const cd = Array.isArray(p.cooldowns) ? p.cooldowns : [];
+    clearCooldownsBtn.hidden = cd.length === 0;
+    clearCooldownsBtn.textContent = `Clear cooldowns (${cd.length})`;
+    clearCooldownsBtn.title = cd.map(c => `${c.engine}/${c.model} (${c.remainingSec}s)`).join(', ');
   }
 }
 
@@ -1333,6 +1632,27 @@ if (timeoutInput) {
     }
   });
 }
+if (modePhasedBtn) modePhasedBtn.addEventListener('click', () => updatePreference({ executionMode: 'phased' }));
+if (modeSingleBtn) modeSingleBtn.addEventListener('click', () => updatePreference({ executionMode: 'single' }));
+if (advanceAutoBtn) advanceAutoBtn.addEventListener('click', () => updatePreference({ phaseAdvance: 'auto' }));
+if (advanceManualBtn) advanceManualBtn.addEventListener('click', () => updatePreference({ phaseAdvance: 'manual' }));
+if (memoryOnBtn) memoryOnBtn.addEventListener('click', () => updatePreference({ projectMemory: true }));
+if (memoryOffBtn) memoryOffBtn.addEventListener('click', () => updatePreference({ projectMemory: false }));
+if (quotaSwitchOnBtn) quotaSwitchOnBtn.addEventListener('click', () => updatePreference({ quotaAutoSwitch: true }));
+if (quotaSwitchOffBtn) quotaSwitchOffBtn.addEventListener('click', () => updatePreference({ quotaAutoSwitch: false }));
+if (crossEngineOnBtn) crossEngineOnBtn.addEventListener('click', () => updatePreference({ crossEngineFallback: true }));
+if (crossEngineOffBtn) crossEngineOffBtn.addEventListener('click', () => updatePreference({ crossEngineFallback: false }));
+if (maxRetriesInput) {
+  maxRetriesInput.addEventListener('change', () => {
+    const val = Number(maxRetriesInput.value);
+    if (Number.isFinite(val) && val >= 1 && val <= 10) {
+      updatePreference({ maxQuotaRetries: val });
+    }
+  });
+}
+if (clearCooldownsBtn) {
+  clearCooldownsBtn.addEventListener('click', () => updatePreference({ clearCooldowns: true }));
+}
 
 /* ---------- field guide ---------- */
 const guideOverlay = $('#guideOverlay');
@@ -1358,6 +1678,7 @@ guideOverlay.addEventListener('click', (e) => { if (e.target.hasAttribute('data-
 document.addEventListener('keydown', (e) => {
   const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target && e.target.tagName) || '');
   if (e.key === 'Escape') {
+    if (memoryOverlay && !memoryOverlay.hidden) { memoryOverlay.hidden = true; return; }
     if (!settingsOverlay.hidden) { closeSettings(); return; }
     if (!stageSheet.hidden) { closeStageSheet(); return; }
     if (!guideOverlay.hidden) { closeGuide(); return; }

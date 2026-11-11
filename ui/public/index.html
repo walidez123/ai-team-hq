@@ -97,6 +97,7 @@
         <h2 id="wire-h">Live wire</h2>
         <div class="wire-controls">
           <select id="agentSelect" aria-label="Who takes this task" data-tip="Dispatcher runs the full pipeline, or pick one employee for focused work."></select>
+          <button id="pausePhaseBtn" class="btn btn-quiet btn-small" hidden data-tip="Pause cleanly after the current pipeline phase completes.">⏸ Pause phase</button>
           <button id="detachBtn" class="btn btn-quiet btn-small" hidden data-tip="Detach viewer without stopping the background run.">Detach</button>
           <button id="stopBtn" class="btn btn-danger btn-small" disabled data-tip="Halt the current run process immediately.">Stop run</button>
           <button id="shiftViewBtn" class="btn btn-quiet btn-small" aria-pressed="false" data-tip="Per-employee shift log — one line each, straight from their journals.">shift log</button>
@@ -120,6 +121,23 @@
             <button id="createProjectBtn" class="btn btn-assign" type="button">Create &amp; scaffold</button>
           </div>
           <p class="new-project-note">Fresh folder: git init + AGENTS.md + .agents/agents + report template. Existing folder: adds only what's missing, never overwrites.</p>
+        </div>
+
+        <!-- Phased Project Memory & Continuation Bar -->
+        <div id="memoryBar" class="memory-bar" hidden aria-live="polite">
+          <div class="memory-bar-top">
+            <div class="memory-title-wrap">
+              <span class="memory-badge" id="memoryStatusBadge">PHASED MEMORY</span>
+              <span class="memory-task" id="memoryTaskLabel">—</span>
+              <span class="memory-engine-note" id="memoryEngineLabel"></span>
+            </div>
+            <div class="memory-actions">
+              <button type="button" id="resumePhaseBtn" class="btn btn-assign btn-small" data-tip="Continue this task from the active phase using your currently selected engine and models.">▶ Resume / Next Phase</button>
+              <button type="button" id="openMemoryBtn" class="btn btn-quiet btn-small" data-tip="Inspect or edit saved project memory, architectural plan, and phase checkpoints.">🧠 Memory</button>
+              <button type="button" id="resetMemoryBtn" class="btn btn-quiet btn-small" data-tip="Clear saved project memory for this folder.">↺ Reset</button>
+            </div>
+          </div>
+          <div id="memoryPhasePills" class="memory-phases" role="group" aria-label="Pipeline phases — click a phase to resume from it"></div>
         </div>
 
         <!-- Quick-dispatch prompt templates -->
@@ -224,25 +242,98 @@
       <p class="vital-note" id="distributeNote" aria-live="polite" hidden></p>
       <div class="settings-body" id="settingsBody"></div>
 
-      <footer class="guide-foot">
-        <small>Saved into <code>.agents/agents/&lt;name&gt;.md</code> &amp; global plugin <code>~/.gemini/config/plugins/ai-team</code> (plus <code>.opencode/agents/</code>). <b>Effort</b> is passed through as <code>--effort</code> / <code>reasoningEffort</code>.</small>
-        <div class="pref-bar" role="group" aria-label="Engine and routing configuration">
-          <span class="pref-label">engine</span>
-          <button type="button" class="seg" id="engineAgy" aria-pressed="true" data-tip="Use Google Antigravity CLI (agy) — recommended primary engine">Antigravity (agy)</button>
-          <button type="button" class="seg" id="engineOpencode" aria-pressed="false" data-tip="Use OpenCode CLI (opencode) fallback engine">OpenCode</button>
-          <span class="pref-sep">·</span>
-          <span class="pref-label">routing</span>
-          <button type="button" class="seg" id="routingStatic" aria-pressed="true" data-tip="You pick each employee's model — the dispatcher uses them as configured">static — you pick</button>
-          <button type="button" class="seg" id="routingDynamic" aria-pressed="false" data-tip="The dispatcher reads each brief and reaches for the deep tier (−deep agents) on hard steps">dynamic — dispatcher routes</button>
-          <span class="pref-sep">·</span>
-          <label class="timeout-label">
-            <span class="pref-label">watchdog (min)</span>
-            <input type="number" id="timeoutInput" min="1" max="120" value="10" class="timeout-input" data-tip="Inactivity timeout in minutes before halting a hung run." />
-          </label>
+      <footer class="guide-foot settings-foot">
+        <div class="pref-stack">
+          <div class="pref-bar" role="group" aria-label="Engine and routing configuration">
+            <span class="pref-label">engine</span>
+            <button type="button" class="seg" id="engineAgy" aria-pressed="true" data-tip="Use Google Antigravity CLI (agy) — recommended primary engine">Antigravity (agy)</button>
+            <button type="button" class="seg" id="engineOpencode" aria-pressed="false" data-tip="Use OpenCode CLI (opencode) fallback engine">OpenCode</button>
+            <span class="pref-sep">·</span>
+            <span class="pref-label">routing</span>
+            <button type="button" class="seg" id="routingStatic" aria-pressed="true" data-tip="You pick each employee's model — the dispatcher uses them as configured">static — you pick</button>
+            <button type="button" class="seg" id="routingDynamic" aria-pressed="false" data-tip="The dispatcher reads each brief and reaches for the deep tier (−deep agents) on hard steps">dynamic — dispatcher routes</button>
+            <span class="pref-sep">·</span>
+            <label class="timeout-label">
+              <span class="pref-label">watchdog (min)</span>
+              <input type="number" id="timeoutInput" min="1" max="120" value="10" class="timeout-input" data-tip="Inactivity timeout in minutes before halting a hung run." />
+            </label>
+          </div>
+
+          <div class="pref-bar" role="group" aria-label="Phased execution and persistent memory configuration">
+            <span class="pref-label">pipeline mode</span>
+            <button type="button" class="seg" id="modePhased" aria-pressed="true" data-tip="Split full-pipeline tasks into 5 checkpointed phases (Plan -> Build -> Test -> Review -> Report) with saved memory between steps.">phased (5 stages)</button>
+            <button type="button" class="seg" id="modeSingle" aria-pressed="false" data-tip="Run the entire pipeline inside one monolithic CLI session.">single run</button>
+            <span class="pref-sep">·</span>
+            <span class="pref-label">phase advance</span>
+            <button type="button" class="seg" id="advanceAuto" aria-pressed="true" data-tip="Automatically launch the next phase as soon as the current phase completes.">auto-advance</button>
+            <button type="button" class="seg" id="advanceManual" aria-pressed="false" data-tip="Pause after each phase so you can inspect work, switch models or engines, and click Resume.">pause each phase</button>
+            <span class="pref-sep">·</span>
+            <span class="pref-label">project memory</span>
+            <button type="button" class="seg" id="memoryOn" aria-pressed="true" data-tip="Persist task state, plan, and handoff summaries in .ai-team/memory.json & docs/PROJECT-MEMORY.md so you can switch models/engines mid-project.">memory ON</button>
+            <button type="button" class="seg" id="memoryOff" aria-pressed="false" data-tip="Disable automatic project memory handoff.">memory OFF</button>
+          </div>
+
+          <div class="pref-bar" role="group" aria-label="Automatic quota failover configuration">
+            <span class="pref-label">quota failover</span>
+            <button type="button" class="seg" id="quotaSwitchOn" aria-pressed="true" data-tip="Automatically detect model quota / 429 errors, switch the employee to the next available model, and continue the task.">auto-switch model ON</button>
+            <button type="button" class="seg" id="quotaSwitchOff" aria-pressed="false" data-tip="Stop on quota errors without switching models.">OFF</button>
+            <span class="pref-sep">·</span>
+            <span class="pref-label">cross-engine</span>
+            <button type="button" class="seg" id="crossEngineOn" aria-pressed="true" data-tip="If all models in the current engine hit quota, automatically switch between OpenCode and Antigravity (agy) to continue.">agy ↔ opencode ON</button>
+            <button type="button" class="seg" id="crossEngineOff" aria-pressed="false" data-tip="Only switch models within the currently selected engine.">same engine only</button>
+            <span class="pref-sep">·</span>
+            <label class="timeout-label">
+              <span class="pref-label">max retries</span>
+              <input type="number" id="maxRetriesInput" min="1" max="10" value="3" class="timeout-input" data-tip="Maximum automatic model switches per phase when quota is hit." />
+            </label>
+            <button type="button" id="clearCooldownsBtn" class="btn btn-quiet btn-tiny" hidden title="Clear active model quota cooldowns">Clear cooldowns (0)</button>
+          </div>
         </div>
+        <div class="pref-foot-row">
+          <small>Saved into <code>.agents/agents/&lt;name&gt;.md</code> &amp; <code>~/.gemini/config/ai-team-preferences.json</code>.</small>
+          <div class="pref-buttons">
+            <button id="distributeFree" class="btn btn-quiet btn-small" title="Assign recommended models across the 8 employees">Assign recommended models</button>
+            <button id="settingsDone" class="btn btn-assign">Done</button>
+          </div>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <!-- Project Memory Inspector & Editor Modal -->
+  <div class="guide-overlay" id="memoryOverlay" role="dialog" aria-modal="true" aria-labelledby="memoryModalTitle" hidden>
+    <div class="guide-backdrop" data-memory-close></div>
+    <div class="guide-panel memory-modal-panel">
+      <header class="guide-head">
+        <div>
+          <h2 id="memoryModalTitle">Project memory &amp; phase handoff</h2>
+          <p>Stored in <code>.ai-team/memory.json</code> &amp; <code>docs/PROJECT-MEMORY.md</code>. Shared across OpenCode &amp; Antigravity models so you can switch mid-project without losing context.</p>
+        </div>
+        <button class="guide-close" id="closeMemoryModal" aria-label="Close project memory">×</button>
+      </header>
+      <div class="memory-modal-body">
+        <div class="memory-field">
+          <label for="memoryTaskEdit">Active task goal</label>
+          <input id="memoryTaskEdit" type="text" autocomplete="off" placeholder="Task description…" />
+        </div>
+        <div class="memory-field">
+          <label for="memoryNotesEdit">Principal handoff notes (injected into every phase prompt)</label>
+          <textarea id="memoryNotesEdit" rows="2" placeholder="Add constraints, instructions, or context for the next model/phase…"></textarea>
+        </div>
+        <div class="memory-field">
+          <label for="memoryPlanEdit">Architectural plan summary (Phase 1 output — editable before Build/Test)</label>
+          <textarea id="memoryPlanEdit" rows="5" placeholder="Architectural plan summary will appear here after Phase 1 (Plan)…"></textarea>
+        </div>
+        <div class="memory-field">
+          <label>Checkpointed phases (click "Resume here" on any phase to run from that point)</label>
+          <div id="memoryModalPhases" class="memory-modal-phases"></div>
+        </div>
+      </div>
+      <footer class="guide-foot">
+        <small id="memoryMetaNote">No active memory in this folder.</small>
         <div class="pref-buttons">
-          <button id="distributeFree" class="btn btn-quiet btn-small" title="Assign recommended models across the 8 employees">Assign recommended models</button>
-          <button id="settingsDone" class="btn btn-assign">Done</button>
+          <button type="button" id="saveMemoryBtn" class="btn btn-assign">Save memory</button>
+          <button type="button" id="closeMemoryDoneBtn" class="btn btn-quiet btn-small">Close</button>
         </div>
       </footer>
     </div>
