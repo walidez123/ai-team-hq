@@ -1,4 +1,4 @@
-# new-project.ps1 — scaffold a fresh project or adopt an existing one.
+﻿# new-project.ps1 — scaffold a fresh project or adopt an existing one.
 #
 #   New (path doesn't exist or is empty):
 #     .\tools\new-project.ps1 -Name invoice-cli -Path "C:\work\invoice-cli"
@@ -6,7 +6,7 @@
 #   Existing project (adds only what's missing, never overwrites):
 #     .\tools\new-project.ps1 -Name invoice-cli -Path "C:\work\invoice-cli" -Adopt
 #
-# Creates/fills: AGENTS.md, docs\report-template.md, reports\.gitkeep, .gitignore, git init,
+# Creates/fills: AGENTS.md, .agents\agents\*, docs\report-template.md, reports\.gitkeep, .gitignore, git init,
 # and registers the path in the AI Team HQ registry (projects.json).
 param(
     [Parameter(Mandatory = $true)] [string] $Name,
@@ -28,7 +28,7 @@ if ($nonEmpty -and -not $Adopt) {
 }
 
 New-Item -ItemType Directory -Force $Path | Out-Null
-New-Item -ItemType Directory -Force (Join-Path $Path 'docs'), (Join-Path $Path 'reports'), (Join-Path $Path 'journal') | Out-Null
+New-Item -ItemType Directory -Force (Join-Path $Path 'docs'), (Join-Path $Path 'reports'), (Join-Path $Path 'journal'), (Join-Path $Path '.agents\agents') | Out-Null
 
 function Copy-IfMissing([string] $src, [string] $dst) {
     if (-not (Test-Path $dst)) {
@@ -52,31 +52,38 @@ if (-not (Test-Path (Join-Path $Path 'reports\.gitkeep'))) {
     Write-Host '  + reports\.gitkeep'
 }
 
+# Copy Antigravity agent definitions if missing
+$hqAgents = Join-Path $HQ '.agents\agents'
+if (Test-Path $hqAgents) {
+    foreach ($f in Get-ChildItem $hqAgents -Filter '*.md') {
+        Copy-IfMissing $f.FullName (Join-Path $Path ".agents\agents\$($f.Name)")
+    }
+}
+
 # git init (skip if already a repo or git missing)
 if (-not (Test-Path (Join-Path $Path '.git'))) {
     try {
         git -C $Path init -b main | Out-Null
         Write-Host '  + git repo (branch main)'
     } catch {
-        Write-Host '  ! git init failed — continuing without git' -ForegroundColor Yellow
+        try { git -C $Path init | Out-Null; Write-Host '  + git repo' }
+        catch { Write-Host '  ! git unavailable — folder created without repo' -ForegroundColor Yellow }
     }
-} else { Write-Host '  = already a git repo' }
+} else {
+    Write-Host '  = existing git repo'
+}
 
-# register in the HQ registry (any path, de-duplicated by case-insensitive path)
-$list = @()
+# Register in projects.json (de-duplicated by normalized path)
+$resolved = (Resolve-Path $Path).Path
+$now      = (Get-Date).ToUniversalTime().ToString('o')
+$list     = @()
 if (Test-Path $Registry) {
     try { $list = @(Get-Content $Registry -Raw | ConvertFrom-Json) } catch { $list = @() }
 }
-$norm = ([System.IO.Path]::GetFullPath($Path)).TrimEnd('\')
-$list = @($list | Where-Object { ([System.IO.Path]::GetFullPath($_.path)).TrimEnd('\') -ine $norm })
-$list += [pscustomobject]@{
-    name     = $Name
-    path     = $norm
-    addedAt  = (Get-Date).ToString('s')
-    lastUsed = (Get-Date).ToString('s')
-}
-$list | ConvertTo-Json -Depth 3 | Set-Content $Registry -Encoding utf8
+$norm = { param($p) ([string]$p).TrimEnd('\','/').ToLowerInvariant() }
+$key  = & $norm $resolved
+$list = @($list | Where-Object { (& $norm $_.path) -ne $key })
+$list += [pscustomobject]@{ name = $Name; path = $resolved; addedAt = $now; lastUsed = $now }
+ConvertTo-Json -InputObject @($list) -Depth 4 | Set-Content $Registry -Encoding utf8
 Write-Host "  + registered in $Registry"
-Write-Host ''
-Write-Host "Done. In the HQ UI pick it from 'Known projects', or run opencode in:" -ForegroundColor Green
-Write-Host "  cd `"$Path`"; opencode"
+Write-Host "Done." -ForegroundColor Green

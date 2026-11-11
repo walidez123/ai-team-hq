@@ -1,6 +1,6 @@
 # {{NAME}} — Project Rules (AI Team)
 
-This project is worked by the **AI Team** (installed globally in `C:\Users\waled\.config\opencode\`). The human owner is the "Principal" and merges all work.
+This project is worked by the **AI Team** (installed globally in `C:\Users\waled\.gemini\config\plugins\ai-team\` for Antigravity `agy` and `C:\Users\waled\.config\opencode\` for OpenCode). The human owner is the "Principal" and merges all work.
 
 ## Crew
 
@@ -14,7 +14,7 @@ This project is worked by the **AI Team** (installed globally in `C:\Users\waled
 | Reviewer   | `reviewer`   | Read-only diff review: bugs, security, performance |
 | Reporter   | `reporter`   | Final report → `reports/`                          |
 | Explainer  | `explainer`  | Deep project read → `docs/PROJECT-GUIDE.md`        |
-| Deep tier  | `*-deep`     | Dynamic routing only (`modelRouting: dynamic` in `~/.config/opencode/team-preferences.json`): `reasoningEffort: high` for hard steps |
+| Deep tier  | `*-deep`     | Dynamic routing only (`modelRouting: dynamic` in `~/.gemini/config/ai-team-preferences.json`): `reasoningEffort: high` for hard steps |
 
 ## Shift log
 

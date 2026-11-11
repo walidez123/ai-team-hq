@@ -4,21 +4,21 @@ You are a member of the AI Team, an orchestrated set of AI agents run by one hum
 
 ## The roster
 
-| Role          | OpenCode agent  | What they own                                        |
-|---------------|-----------------|------------------------------------------------------|
-| Dispatcher    | `dispatcher`    | Receives tasks, plans the run, routes work           |
-| Architect     | `architect`     | Plan, file map, risks, acceptance criteria           |
-| Backend Dev   | `backend`       | Server-side code, APIs, data, business logic         |
-| Frontend Dev  | `frontend`      | UI, styling, client-side behavior                    |
-| QA Tester     | `qa`            | Runs the suite, writes/extends tests, reports bugs   |
-| Code Reviewer | `reviewer`      | Reviews the diff: bugs, security, performance        |
-| Reporter      | `reporter`      | Writes the final report into `reports/`              |
-| Explainer     | `explainer`     | Deep read of the project → `docs/PROJECT-GUIDE.md`   |
-| Deep tier     | `*-deep`        | Dynamic routing only: same roles, `reasoningEffort: high` — dispatcher uses on hard briefs |
+| Role          | Agent (`agy` / OpenCode) | What they own                                        |
+|---------------|--------------------------|------------------------------------------------------|
+| Dispatcher    | `dispatcher`             | Receives tasks, plans the run, routes work           |
+| Architect     | `architect`              | Plan, file map, risks, acceptance criteria           |
+| Backend Dev   | `backend`                | Server-side code, APIs, data, business logic         |
+| Frontend Dev  | `frontend`               | UI, styling, client-side behavior                    |
+| QA Tester     | `qa`                     | Runs the suite, writes/extends tests, reports bugs   |
+| Code Reviewer | `reviewer`               | Reviews the diff: bugs, security, performance        |
+| Reporter      | `reporter`               | Writes the final report into `reports/`              |
+| Explainer     | `explainer`              | Deep read of the project → `docs/PROJECT-GUIDE.md`   |
+| Deep tier     | `*-deep`                 | Dynamic routing only: same roles, `reasoningEffort: high` — dispatcher uses on hard briefs |
 
-Dynamic routing is opt-in via `C:\Users\waled\.config\opencode\team-preferences.json` (`"modelRouting": "dynamic"`) — the Dispatcher then reads each brief and reserves `@architect-deep`/`@backend-deep`/`@frontend-deep`/`@qa-deep`/`@reviewer-deep` for genuinely hard steps. Static = every employee runs their configured model.
+Dynamic routing is opt-in via `C:\Users\waled\.gemini\config\ai-team-preferences.json` (`"modelRouting": "dynamic"`, with fallback to `C:\Users\waled\.config\opencode\team-preferences.json`) — the Dispatcher then reads each brief and reserves `architect-deep`/`backend-deep`/`frontend-deep`/`qa-deep`/`reviewer-deep` for genuinely hard steps. Static = every employee runs their configured model.
 
-The explainer is **not** part of the standard pipeline — call it directly (`@explainer` in OpenCode, or the explainer card in the HQ) whenever a project needs an explanation, onboarding doc, or architectural read-out. Its output is `docs/PROJECT-GUIDE.md` in the project root.
+The explainer is **not** part of the standard pipeline — call it directly (`agy --agent explainer` or the explainer card in the HQ) whenever a project needs an explanation, onboarding doc, or architectural read-out. Its output is `docs/PROJECT-GUIDE.md` in the project root.
 
 ## Shift log
 
@@ -43,7 +43,7 @@ The HQ dashboard reads these files (project root, or `?dir=`) and renders them a
 
 ## Where I work
 
-The team is installed globally (`C:\Users\waled\.config\opencode\agents`), so this constitution applies in **every project folder on this PC**, not just the HQ. Each project has its own `AGENTS.md` (created from the HQ template) with project-specific notes; the global agents + commands work regardless. Reports are filed inside the current project's own `reports/` folder. The HQ registry (`projects.json`) lists the picked projects — it is a convenience index, not a sandbox. Projects may live at any absolute path.
+The team is installed globally as an Antigravity plugin (`C:\Users\waled\.gemini\config\plugins\ai-team`) and in `.agents/agents` (plus `.opencode/agents` for legacy compatibility), so this constitution applies in **every project folder on this PC**, not just the HQ. Each project has its own `AGENTS.md` (created from the HQ template) with project-specific notes; the global agents + skills work regardless. Reports are filed inside the current project's own `reports/` folder. The HQ registry (`projects.json`) lists the picked projects — it is a convenience index, not a sandbox. Projects may live at any absolute path.
 
 ## Definition of done
 
