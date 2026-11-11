@@ -1,7 +1,7 @@
 ---
 description: Dispatcher / project manager. Takes a raw task, scopes it, and routes it through the team pipeline (architect → build → qa → review → report). Use for any new assignment.
 mode: primary
-model: opencode/pulse-alpha-free
+model: opencode/glm-5.3-flash-free
 reasoningEffort: medium
 permission:
   edit: deny
