@@ -120,15 +120,20 @@ const AGY_PREFS_FILE = path.join(os.homedir(), '.gemini', 'config', 'ai-team-pre
 const LEGACY_PREFS_FILE = path.join(os.homedir(), '.config', 'opencode', 'team-preferences.json');
 
 function readPrefs() {
-  for (const file of [AGY_PREFS_FILE, LEGACY_PREFS_FILE]) {
+  const candidates = [];
+  for (const file of [LEGACY_PREFS_FILE, AGY_PREFS_FILE]) {
     try {
       if (fs.existsSync(file)) {
+        const st = fs.statSync(file);
         const j = JSON.parse(fs.readFileSync(file, 'utf8'));
-        if (j && typeof j === 'object') return j;
+        if (j && typeof j === 'object') candidates.push({ mtime: st.mtimeMs || 0, data: j });
       }
     } catch { /* ignore */ }
   }
-  return {};
+  candidates.sort((a, b) => a.mtime - b.mtime);
+  const merged = {};
+  for (const c of candidates) Object.assign(merged, c.data);
+  return merged;
 }
 
 function writePrefs(prefs) {

@@ -889,6 +889,12 @@ textarea::placeholder, input::placeholder { color: var(--faint); }
   gap: 8px;
   width: 100%;
 }
+.pref-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
 .pref-foot-row {
   display: flex;
   justify-content: space-between;

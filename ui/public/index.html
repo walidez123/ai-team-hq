@@ -245,44 +245,58 @@
       <footer class="guide-foot settings-foot">
         <div class="pref-stack">
           <div class="pref-bar" role="group" aria-label="Engine and routing configuration">
-            <span class="pref-label">engine</span>
-            <button type="button" class="seg" id="engineAgy" aria-pressed="true" data-tip="Use Google Antigravity CLI (agy) — recommended primary engine">Antigravity (agy)</button>
-            <button type="button" class="seg" id="engineOpencode" aria-pressed="false" data-tip="Use OpenCode CLI (opencode) fallback engine">OpenCode</button>
+            <span class="pref-group">
+              <span class="pref-label">engine</span>
+              <button type="button" class="seg" id="engineAgy" aria-pressed="true" data-tip="Use Google Antigravity CLI (agy) — recommended primary engine">Antigravity (agy)</button>
+              <button type="button" class="seg" id="engineOpencode" aria-pressed="false" data-tip="Use OpenCode CLI (opencode) fallback engine">OpenCode</button>
+            </span>
             <span class="pref-sep">·</span>
-            <span class="pref-label">routing</span>
-            <button type="button" class="seg" id="routingStatic" aria-pressed="true" data-tip="You pick each employee's model — the dispatcher uses them as configured">static — you pick</button>
-            <button type="button" class="seg" id="routingDynamic" aria-pressed="false" data-tip="The dispatcher reads each brief and reaches for the deep tier (−deep agents) on hard steps">dynamic — dispatcher routes</button>
+            <span class="pref-group">
+              <span class="pref-label">routing</span>
+              <button type="button" class="seg" id="routingStatic" aria-pressed="true" data-tip="You pick each employee's model — the dispatcher uses them as configured">static — you pick</button>
+              <button type="button" class="seg" id="routingDynamic" aria-pressed="false" data-tip="The dispatcher reads each brief and reaches for the deep tier (−deep agents) on hard steps">dynamic — dispatcher routes</button>
+            </span>
             <span class="pref-sep">·</span>
-            <label class="timeout-label">
+            <label class="timeout-label pref-group">
               <span class="pref-label">watchdog (min)</span>
               <input type="number" id="timeoutInput" min="1" max="120" value="10" class="timeout-input" data-tip="Inactivity timeout in minutes before halting a hung run." />
             </label>
           </div>
 
           <div class="pref-bar" role="group" aria-label="Phased execution and persistent memory configuration">
-            <span class="pref-label">pipeline mode</span>
-            <button type="button" class="seg" id="modePhased" aria-pressed="true" data-tip="Split full-pipeline tasks into 5 checkpointed phases (Plan -> Build -> Test -> Review -> Report) with saved memory between steps.">phased (5 stages)</button>
-            <button type="button" class="seg" id="modeSingle" aria-pressed="false" data-tip="Run the entire pipeline inside one monolithic CLI session.">single run</button>
+            <span class="pref-group">
+              <span class="pref-label">pipeline mode</span>
+              <button type="button" class="seg" id="modePhased" aria-pressed="true" data-tip="Split full-pipeline tasks into 5 checkpointed phases (Plan -> Build -> Test -> Review -> Report) with saved memory between steps.">phased (5 stages)</button>
+              <button type="button" class="seg" id="modeSingle" aria-pressed="false" data-tip="Run the entire pipeline inside one monolithic CLI session.">single run</button>
+            </span>
             <span class="pref-sep">·</span>
-            <span class="pref-label">phase advance</span>
-            <button type="button" class="seg" id="advanceAuto" aria-pressed="true" data-tip="Automatically launch the next phase as soon as the current phase completes.">auto-advance</button>
-            <button type="button" class="seg" id="advanceManual" aria-pressed="false" data-tip="Pause after each phase so you can inspect work, switch models or engines, and click Resume.">pause each phase</button>
+            <span class="pref-group">
+              <span class="pref-label">phase advance</span>
+              <button type="button" class="seg" id="advanceAuto" aria-pressed="true" data-tip="Automatically launch the next phase as soon as the current phase completes.">auto-advance</button>
+              <button type="button" class="seg" id="advanceManual" aria-pressed="false" data-tip="Pause after each phase so you can inspect work, switch models or engines, and click Resume.">pause each phase</button>
+            </span>
             <span class="pref-sep">·</span>
-            <span class="pref-label">project memory</span>
-            <button type="button" class="seg" id="memoryOn" aria-pressed="true" data-tip="Persist task state, plan, and handoff summaries in .ai-team/memory.json & docs/PROJECT-MEMORY.md so you can switch models/engines mid-project.">memory ON</button>
-            <button type="button" class="seg" id="memoryOff" aria-pressed="false" data-tip="Disable automatic project memory handoff.">memory OFF</button>
+            <span class="pref-group">
+              <span class="pref-label">project memory</span>
+              <button type="button" class="seg" id="memoryOn" aria-pressed="true" data-tip="Persist task state, plan, and handoff summaries in .ai-team/memory.json & docs/PROJECT-MEMORY.md so you can switch models/engines mid-project.">ON</button>
+              <button type="button" class="seg" id="memoryOff" aria-pressed="false" data-tip="Disable automatic project memory handoff.">OFF</button>
+            </span>
           </div>
 
           <div class="pref-bar" role="group" aria-label="Automatic quota failover configuration">
-            <span class="pref-label">quota failover</span>
-            <button type="button" class="seg" id="quotaSwitchOn" aria-pressed="true" data-tip="Automatically detect model quota / 429 errors, switch the employee to the next available model, and continue the task.">auto-switch model ON</button>
-            <button type="button" class="seg" id="quotaSwitchOff" aria-pressed="false" data-tip="Stop on quota errors without switching models.">OFF</button>
+            <span class="pref-group">
+              <span class="pref-label">quota failover</span>
+              <button type="button" class="seg" id="quotaSwitchOn" aria-pressed="true" data-tip="Automatically detect model quota / 429 errors, switch the employee to the next available model, and continue the task.">auto-switch ON</button>
+              <button type="button" class="seg" id="quotaSwitchOff" aria-pressed="false" data-tip="Stop on quota errors without switching models.">OFF</button>
+            </span>
             <span class="pref-sep">·</span>
-            <span class="pref-label">cross-engine</span>
-            <button type="button" class="seg" id="crossEngineOn" aria-pressed="true" data-tip="If all models in the current engine hit quota, automatically switch between OpenCode and Antigravity (agy) to continue.">agy ↔ opencode ON</button>
-            <button type="button" class="seg" id="crossEngineOff" aria-pressed="false" data-tip="Only switch models within the currently selected engine.">same engine only</button>
+            <span class="pref-group">
+              <span class="pref-label">cross-engine</span>
+              <button type="button" class="seg" id="crossEngineOn" aria-pressed="true" data-tip="If all models in the current engine hit quota, automatically switch between OpenCode and Antigravity (agy) to continue.">agy ↔ opencode ON</button>
+              <button type="button" class="seg" id="crossEngineOff" aria-pressed="false" data-tip="Only switch models within the currently selected engine.">same engine only</button>
+            </span>
             <span class="pref-sep">·</span>
-            <label class="timeout-label">
+            <label class="timeout-label pref-group">
               <span class="pref-label">max retries</span>
               <input type="number" id="maxRetriesInput" min="1" max="10" value="3" class="timeout-input" data-tip="Maximum automatic model switches per phase when quota is hit." />
             </label>
@@ -290,7 +304,7 @@
           </div>
         </div>
         <div class="pref-foot-row">
-          <small>Saved into <code>.agents/agents/&lt;name&gt;.md</code> &amp; <code>~/.gemini/config/ai-team-preferences.json</code>.</small>
+          <small>Saved into <code>.agents/agents/&lt;name&gt;.md</code> &amp; <code>~/.gemini/config/ai-team-preferences.json</code>. <span id="prefSaveNote" class="setting-save"></span></small>
           <div class="pref-buttons">
             <button id="distributeFree" class="btn btn-quiet btn-small" title="Assign recommended models across the 8 employees">Assign recommended models</button>
             <button id="settingsDone" class="btn btn-assign">Done</button>

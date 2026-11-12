@@ -1553,43 +1553,56 @@ const crossEngineOnBtn = $('#crossEngineOn');
 const crossEngineOffBtn = $('#crossEngineOff');
 const maxRetriesInput = $('#maxRetriesInput');
 const clearCooldownsBtn = $('#clearCooldownsBtn');
+const prefSaveNote = $('#prefSaveNote');
+let prefSaveTimer = null;
+
+function flashPrefSave(text, ok = true) {
+  if (!prefSaveNote) return;
+  prefSaveNote.textContent = text;
+  prefSaveNote.classList.toggle('err', !ok);
+  prefSaveNote.classList.add('show');
+  clearTimeout(prefSaveTimer);
+  prefSaveTimer = setTimeout(() => prefSaveNote.classList.remove('show'), 2500);
+}
 
 function setPrefsUI(p) {
   if (!p) return;
-  routingStaticBtn.setAttribute('aria-pressed', String(p.modelRouting === 'static'));
-  routingDynamicBtn.setAttribute('aria-pressed', String(p.modelRouting === 'dynamic'));
+  state.prefs = { ...(state.prefs || {}), ...p };
+  const cur = state.prefs;
+  routingStaticBtn.setAttribute('aria-pressed', String(cur.modelRouting === 'static'));
+  routingDynamicBtn.setAttribute('aria-pressed', String(cur.modelRouting === 'dynamic'));
   if (engineAgyBtn && engineOpencodeBtn) {
-    engineAgyBtn.setAttribute('aria-pressed', String(p.engine !== 'opencode'));
-    engineOpencodeBtn.setAttribute('aria-pressed', String(p.engine === 'opencode'));
+    engineAgyBtn.setAttribute('aria-pressed', String(cur.engine !== 'opencode'));
+    engineOpencodeBtn.setAttribute('aria-pressed', String(cur.engine === 'opencode'));
   }
-  if (timeoutInput && p.inactivityTimeoutMin) {
-    timeoutInput.value = String(p.inactivityTimeoutMin);
+  if (timeoutInput && cur.inactivityTimeoutMin) {
+    timeoutInput.value = String(cur.inactivityTimeoutMin);
   }
   if (modePhasedBtn && modeSingleBtn) {
-    modePhasedBtn.setAttribute('aria-pressed', String(p.executionMode !== 'single'));
-    modeSingleBtn.setAttribute('aria-pressed', String(p.executionMode === 'single'));
+    modePhasedBtn.setAttribute('aria-pressed', String(cur.executionMode !== 'single'));
+    modeSingleBtn.setAttribute('aria-pressed', String(cur.executionMode === 'single'));
   }
   if (advanceAutoBtn && advanceManualBtn) {
-    advanceAutoBtn.setAttribute('aria-pressed', String(p.phaseAdvance !== 'manual'));
-    advanceManualBtn.setAttribute('aria-pressed', String(p.phaseAdvance === 'manual'));
+    advanceAutoBtn.setAttribute('aria-pressed', String(cur.phaseAdvance !== 'manual'));
+    advanceManualBtn.setAttribute('aria-pressed', String(cur.phaseAdvance === 'manual'));
   }
   if (memoryOnBtn && memoryOffBtn) {
-    memoryOnBtn.setAttribute('aria-pressed', String(p.projectMemory !== false));
-    memoryOffBtn.setAttribute('aria-pressed', String(p.projectMemory === false));
+    memoryOnBtn.setAttribute('aria-pressed', String(cur.projectMemory !== false));
+    memoryOffBtn.setAttribute('aria-pressed', String(cur.projectMemory === false));
   }
   if (quotaSwitchOnBtn && quotaSwitchOffBtn) {
-    quotaSwitchOnBtn.setAttribute('aria-pressed', String(p.quotaAutoSwitch !== false));
-    quotaSwitchOffBtn.setAttribute('aria-pressed', String(p.quotaAutoSwitch === false));
+    quotaSwitchOnBtn.setAttribute('aria-pressed', String(cur.quotaAutoSwitch !== false));
+    quotaSwitchOffBtn.setAttribute('aria-pressed', String(cur.quotaAutoSwitch === false));
   }
   if (crossEngineOnBtn && crossEngineOffBtn) {
-    crossEngineOnBtn.setAttribute('aria-pressed', String(p.crossEngineFallback !== false));
-    crossEngineOffBtn.setAttribute('aria-pressed', String(p.crossEngineFallback === false));
+    crossEngineOnBtn.setAttribute('aria-pressed', String(cur.crossEngineFallback !== false));
+    crossEngineOffBtn.setAttribute('aria-pressed', String(cur.crossEngineFallback === false));
   }
-  if (maxRetriesInput && p.maxQuotaRetries) {
-    maxRetriesInput.value = String(p.maxQuotaRetries);
+  if (maxRetriesInput && cur.maxQuotaRetries) {
+    maxRetriesInput.value = String(cur.maxQuotaRetries);
   }
   if (clearCooldownsBtn) {
-    const cd = Array.isArray(p.cooldowns) ? p.cooldowns : [];
+    const cd = Array.isArray(cur.cooldowns) ? cur.cooldowns : [];
     clearCooldownsBtn.hidden = cd.length === 0;
     clearCooldownsBtn.textContent = `Clear cooldowns (${cd.length})`;
     clearCooldownsBtn.title = cd.map(c => `${c.engine}/${c.model} (${c.remainingSec}s)`).join(', ');
@@ -1605,6 +1618,8 @@ async function loadPreferences() {
 }
 
 async function updatePreference(patch) {
+  // Optimistically toggle UI immediately
+  setPrefsUI(patch);
   try {
     const r = await fetch('/api/preferences', {
       method: 'POST',
@@ -1613,11 +1628,16 @@ async function updatePreference(patch) {
     });
     const p = await r.json();
     if (r.ok) {
-      setPrefsUI(p);
+      setPrefsUI({ ...patch, ...p });
+      flashPrefSave('saved ✓', true);
       fetchTeam();
       if (!settingsOverlay.hidden && patch.engine) loadSettings();
+    } else {
+      flashPrefSave(p.error || 'save failed', false);
     }
-  } catch { /* leave as-is */ }
+  } catch (e) {
+    flashPrefSave('save failed', false);
+  }
 }
 
 routingStaticBtn.addEventListener('click', () => updatePreference({ modelRouting: 'static' }));
